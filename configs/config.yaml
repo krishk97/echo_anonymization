@@ -1,0 +1,70 @@
+# Echo anonymization pipeline config -- shared by both scripts.
+# Edit the paths below; everything else has working defaults.
+
+paths:
+  # Root directory containing the raw DICOM files (searched recursively).
+  dicom_root: /path/to/raw_dicoms
+  dicom_extension: dcm
+  # SECURE area (contains PHI): crosswalk.csv, manifest/, status/, logs. Keep access restricted.
+  secure_dir: /path/to/secure
+  # Anonymized outputs: media/<anon_patient>/<anon_study>/<name>.<png|avi>, results/, results_table.parquet
+  output_root: /path/to/anonymized
+
+# ---------------- Script 1: index_and_anonymize.py (CPU) ----------------
+index:
+  num_workers: 32
+  chunk_size: 10000
+  sop_classes:
+    - Ultrasound Image Storage
+    - Ultrasound Multi-frame Image Storage
+  # Records whose decoded RGB size exceeds this are flagged `oversize` and skipped by Script 2.
+  max_decoded_gb: 4.0
+  # Per-patient random date shift, inclusive range in days (~ +99 to +100 years).
+  date_offset_days: [36159, 36525]
+  age_cap_years: 90
+  default_fps: 30
+  # Dates that are copied after shifting (stored as <Keyword>_shifted).
+  date_fields: [StudyDate, SeriesDate, AcquisitionDate, ContentDate, AcquisitionDateTime]
+  # Only these header fields are copied into the manifest/results. Never add free-text fields
+  # (descriptions, comments, names, institution, operator...) or private tags.
+  metadata_allowlist:
+    - Modality
+    - Manufacturer
+    - ManufacturerModelName
+    - Rows
+    - Columns
+    - NumberOfFrames
+    - FrameTime
+    - FrameTimeVector
+    - CineRate
+    - EffectiveDuration
+    - PhotometricInterpretation
+    - SamplesPerPixel
+    - BitsAllocated
+    - SeriesNumber
+    - InstanceNumber
+    - PatientSex
+    - PatientSize
+    - PatientWeight
+    - HeartRate
+    - UltrasoundColorDataPresent
+
+# ---------------- Script 2: preprocess_and_classify.py (GPU) ----------------
+preprocess:
+  num_gpus: 4
+  # DataLoader settings (per GPU process)
+  num_workers: 4
+  prefetch_factor: 2
+  # Frames per model call, so long videos cannot exhaust VRAM.
+  frame_chunk: 64
+  # Write a results part file every K rows.
+  flush_every: 500
+  # FourCC codec for AVI output (FFV1 = lossless).
+  video_codec: FFV1
+  # Recorded in every result row; bump it when models or preprocessing change.
+  pipeline_version: v1
+
+models:
+  echofine_weights: ./weights/TTE47_Classifier_Model.h5
+  echoprime_weights: ./weights/echoprime_view_classifier.pt
+  echoprime_compile: false

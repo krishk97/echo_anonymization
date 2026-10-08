@@ -1,0 +1,42 @@
+[project]
+name = "echo-anonymization"
+version = "0.1.0"
+description = "Two-stage echocardiogram DICOM de-identification and view classification pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "pyarrow>=15",
+    "pyyaml>=6.0",
+    "tqdm",
+    "pydicom>=3.0,<4",
+    "pylibjpeg>=2.0",
+    "pylibjpeg-libjpeg",
+    "pylibjpeg-openjpeg",
+    "python-gdcm",
+    "opencv-python>=4.8",  # pip wheels bundle FFmpeg (needed for FFV1 AVI)
+    "pillow>=10",
+    "torch>=2.6",  # >=2.6 for DataLoader(in_order=...)
+    "torchvision>=0.21",
+    "tensorflow[and-cuda]>=2.16",
+    "tf_keras",  # needed by src/view_classifier/echofine.py
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+python-preference = "only-managed"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
