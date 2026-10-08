@@ -7,7 +7,8 @@ paths:
   dicom_extension: dcm
   # SECURE area (contains PHI): crosswalk.csv, manifest/, status/, logs. Keep access restricted.
   secure_dir: /path/to/secure
-  # Anonymized outputs: media/<anon_patient>/<anon_study>/<name>.<png|avi>, results/, results_table.parquet
+  # Anonymized outputs: file/<anon_patient>/<anon_study>/<name>.<png|avi>, results/, echo-record-list.parquet,
+  # echo-study-list.csv
   output_root: /path/to/anonymized
 
 # ---------------- Script 1: index_and_anonymize.py (CPU) ----------------
