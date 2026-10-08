@@ -210,7 +210,7 @@ def run_rank(rank: int, files: list[tuple[str, list[dict]]], cfg: dict, models: 
     """Process one shard of source files with already-loaded models. Returns counts by status."""
     pcfg = cfg["preprocess"]
     out_root = Path(cfg["paths"]["output_root"])
-    media_root = out_root / "media"
+    media_root = out_root / "file"
     writer = ResultWriter(out_root / "results" / f"rank={rank}", pcfg["flush_every"], pcfg["pipeline_version"])
 
     loader_kwargs = dict(batch_size=None, collate_fn=_identity, num_workers=pcfg["num_workers"],
@@ -338,6 +338,21 @@ def run(cfg: dict, retry_errors: bool, log_level: str) -> bool:
     return True
 
 
+def study_list(table: pd.DataFrame, crosswalk_path: Path) -> pd.DataFrame:
+    """One row per study in the record list: subject_id, study_id, study_datetime (shifted StudyDate +
+    StudyTime from the crosswalk; date only if the time is missing, NaT if the date is)."""
+    studies = table.reindex(columns=["anon_patient", "anon_study", "StudyDate_shifted"]).drop_duplicates("anon_study")
+    times = pd.read_csv(crosswalk_path, usecols=["anon_study", "StudyTime"], dtype=str, keep_default_na=False)
+    studies = studies.merge(times.drop_duplicates("anon_study"), on="anon_study", how="left")
+    date = studies["StudyDate_shifted"].fillna("").astype(str).str[:8]
+    time = studies["StudyTime"].fillna("").str.strip().str.split(".").str[0].str.ljust(6, "0")
+    with_time = pd.to_datetime(date + time, format="%Y%m%d%H%M%S", errors="coerce")
+    date_only = pd.to_datetime(date, format="%Y%m%d", errors="coerce")
+    studies["study_datetime"] = with_time.fillna(date_only)
+    studies = studies.rename(columns={"anon_patient": "subject_id", "anon_study": "study_id"})
+    return studies[["subject_id", "study_id", "study_datetime"]].sort_values("study_id").reset_index(drop=True)
+
+
 def merge(cfg: dict) -> pd.DataFrame:
     """Combine result parts into the final table: latest row per item_id, joined with the manifest's
     anonymized metadata through an explicit keep-list (no source paths or real identifiers)."""
@@ -355,11 +370,16 @@ def merge(cfg: dict) -> pd.DataFrame:
     keep = [c for c in dict.fromkeys(keep) if c in manifest.columns]
     table = results[["item_id"] + RESULT_KEEP + model_cols].merge(manifest[keep], on="item_id", how="left")
     table = table[keep + RESULT_KEEP + model_cols].sort_values("item_id").reset_index(drop=True)
-    atomic_write_parquet(table, out_root / "results_table.parquet")
+    atomic_write_parquet(table, out_root / "echo-record-list.parquet")
+    studies = study_list(table, Path(cfg["paths"]["secure_dir"]) / "crosswalk.csv")
+    tmp = out_root / "echo-study-list.csv.tmp"
+    studies.to_csv(tmp, index=False)
+    os.replace(tmp, out_root / "echo-study-list.csv")
 
     success = table["status"] == "success"
-    missing = sum(not (out_root / "media" / p).exists() for p in table.loc[success, "output_path"])
-    logger.info("Final table: %d records -> %s", len(table), out_root / "results_table.parquet")
+    missing = sum(not (out_root / "file" / p).exists() for p in table.loc[success, "output_path"])
+    logger.info("Final table: %d records -> %s", len(table), out_root / "echo-record-list.parquet")
+    logger.info("Study list: %d studies -> %s", len(studies), out_root / "echo-study-list.csv")
     logger.info("QA counts by status: %s", table["status"].value_counts().to_dict())
     logger.info("QA success records with missing media file: %d", missing)
     logger.info("QA manifest records without a result yet: %d", int((~manifest["item_id"].isin(table["item_id"])).sum()))

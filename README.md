@@ -1,11 +1,12 @@
-# Echocardiography Examination Preprocessing & anonymization 
+# Echocardiography preprocessing & anonymization 
 
 Two-stage pipeline that turns a large collection of echocardiogram DICOMs into:
 
 1. a **study-level anonymization crosswalk** (`crosswalk.csv`, append-only),
-2. **anonymized media**: `media/<anon_patient>/<anon_study>/<name>.<png|avi>`,
-3. a **results table**: one row per media record with anonymized metadata and the outputs of two
-   view classifiers (EchoFine, TF/Keras; EchoPrime, PyTorch).
+2. **anonymized media**: `file/<anon_patient>/<anon_study>/<name>.<png|avi>`,
+3. a **record list** (`echo-record-list.parquet`): one row per media record with anonymized metadata and the outputs of two
+   view classifiers (EchoFine, TF/Keras; EchoPrime, PyTorch),
+4. a **study list** (`echo-study-list.csv`): one row per study.
 
 | Script | Hardware | What it does |
 |---|---|---|
@@ -33,7 +34,7 @@ Everything is set in **`configs/config.yaml`**. Usually you only edit `paths:`.
 |---|---|
 | `paths.dicom_root` | Raw DICOM root (searched recursively for `*.<dicom_extension>`) |
 | `paths.secure_dir` | **Contains PHI**: `crosswalk.csv`, `manifest/`, `status/`, Script 1 logs. Restrict access. |
-| `paths.output_root` | Anonymized outputs: `media/`, `results/`, `results_table.parquet`, Script 2 logs |
+| `paths.output_root` | Anonymized outputs: `file/`, `results/`, `echo-record-list.parquet`, `echo-study-list.csv`, Script 2 logs |
 | `index.num_workers`, `index.chunk_size` | Header-reading pool size and files per chunk |
 | `index.sop_classes` | SOP classes to keep (default: the two ultrasound storage classes) |
 | `index.max_decoded_gb` | Files whose decoded RGB size exceeds this are flagged `oversize` and skipped by Script 2 |
@@ -92,10 +93,11 @@ uv run python preprocess_and_classify.py merge --config configs/config.yaml
 
 ### Anonymized area (`paths.output_root`)
 
-- **`media/<anon_patient>/<anon_study>/<name>.png|.avi`**: preprocessed, PHI-masked media. Only the masked version is ever written.
+- **`file/<anon_patient>/<anon_study>/<name>.png|.avi`**: preprocessed, PHI-masked media. Only the masked version is ever written.
 - **`results/rank=<r>/part-NNNNNN.parquet`**: raw result rows, append-only. Each row has `item_id`, `output_path`, `status`, `error_type`, the `echofine_<view>` / `_std` / `echofine_view` columns, the `echoprime_<view>` / `_std` / `echoprime_view` columns, `pipeline_version` and `timestamp`.
   - `status` is one of `success`, `skipped_oversize`, `skipped_undecodable` or `error`.
-- **`results_table.parquet`**: the final table, written by `merge`. It keeps the latest row per `item_id`, joined with the manifest through an explicit keep-list. It contains no source paths and no real identifiers.
+- **`echo-record-list.parquet`**: the final table, written by `merge`. It keeps the latest row per `item_id`, joined with the manifest through an explicit keep-list. It contains no source paths and no real identifiers.
+- **`echo-study-list.csv`**: written by `merge`, one row per study in the record list, with columns `subject_id` (`anon_patient`), `study_id` (`anon_study`) and `study_datetime` (the shifted StudyDate plus the StudyTime; date only if StudyTime is missing).
 
 ## Output naming
 
