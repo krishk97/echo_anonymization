@@ -1,10 +1,3 @@
-"""Script 1 (CPU only): scan DICOM headers, filter to ultrasound, extend the anonymization crosswalk,
-find ultrasound regions, and write the item-level work manifest for Script 2.
-
-Restartable: files already listed in a status part are skipped; the crosswalk is only appended to.
-Per chunk the order is: crosswalk append (fsync) -> manifest part -> status part. The status part is
-the commit marker; a manifest part without its status part is deleted on startup and redone.
-"""
 import json
 import logging
 import multiprocessing as mp

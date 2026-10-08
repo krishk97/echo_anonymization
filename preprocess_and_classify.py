@@ -1,19 +1,3 @@
-"""Script 2 (GPU): decode, crop/mask, classify (EchoFine + EchoPrime) and save every pending manifest record.
-
-Subcommands:
-  run    process pending records with one spawned process per GPU
-  merge  combine result parts into the final anonymized results table
-
-Restartable: the done set is every item_id already in a result part (any status); `--retry-errors`
-re-queues records whose latest status is `error`. A result row is written only after both models
-have run and the media file has been saved atomically.
-
-Model inputs (per source file / record):
-  - EchoFine:  the full, unmasked frames (as in the old pipeline), run once per source file and
-               shared by all of that file's region records.
-  - EchoPrime: the record's preprocessed (cropped + PHI-masked) media.
-Only the preprocessed media is written to disk.
-"""
 import logging
 import multiprocessing as mp
 import os

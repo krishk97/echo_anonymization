@@ -1,4 +1,4 @@
-"""Append-only study-level anonymization crosswalk (CSV).
+"""Study-level anonymization crosswalk table 
 
 One row per study. IDs are sequential counters (P000000, S000000) -- no secret key, no hashing.
 Only the main process of Script 1 ever writes this file (single writer).
