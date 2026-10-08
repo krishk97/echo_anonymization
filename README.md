@@ -21,7 +21,6 @@ Requires [uv](https://docs.astral.sh/uv/). From the repo root:
 
 ```bash
 uv sync                 # creates .venv with Python 3.11 and all dependencies (incl. CUDA wheels)
-uv run pytest           # synthetic-data test suite, CPU only
 ```
 
 Put the model weights where `models:` in the config points (default `./weights/`).
@@ -162,20 +161,4 @@ src/dicom_utils.py          header reading, allowlist/date/age handling, regions
 src/image_utils.py          masking, resizing, AVI writing
 src/io_utils.py             config, atomic parquet writes, logging
 src/view_classifier/        EchoFine / EchoPrime loaders and inference
-tests/                      synthetic DICOM generator + tests (no real data)
 ```
-
-## Tests
-
-```bash
-uv run pytest
-```
-
-The tests run only on synthetic DICOMs from `tests/synthetic.py`, with stub classifiers on CPU. They never read real data. They cover:
-- the SOP class filter
-- crosswalk restarts, patient reuse and truncated-line recovery
-- per-region records and image boxes
-- deterministic collision naming
-- crash and restart for both scripts, and `--retry-errors`
-- image masking
-- that no field outside the allowlist, and no fake-PHI string, appears in the manifest or the final table
