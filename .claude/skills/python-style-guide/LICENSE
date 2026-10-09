@@ -1,607 +1,395 @@
----
-name: python-style-guide
-description: Comprehensive Python programming guidelines based on Google's Python Style Guide. Use when you needs to write Python code, review Python code for style issues, refactor Python code, or provide Python programming guidance. Covers language rules (imports, exceptions, type annotations), style rules (naming conventions, formatting, docstrings), and best practices for clean, maintainable Python code.
-license: Complete terms in LICENSE.txt
----
+Attribution 4.0 International
+
+=======================================================================
+
+Creative Commons Corporation ("Creative Commons") is not a law firm and
+does not provide legal services or legal advice. Distribution of
+Creative Commons public licenses does not create a lawyer-client or
+other relationship. Creative Commons makes its licenses and related
+information available on an "as-is" basis. Creative Commons gives no
+warranties regarding its licenses, any material licensed under their
+terms and conditions, or any related information. Creative Commons
+disclaims all liability for damages resulting from their use to the
+fullest extent possible.
+
+Using Creative Commons Public Licenses
+
+Creative Commons public licenses provide a standard set of terms and
+conditions that creators and other rights holders may use to share
+original works of authorship and other material subject to copyright
+and certain other rights specified in the public license below. The
+following considerations are for informational purposes only, are not
+exhaustive, and do not form part of our licenses.
+
+     Considerations for licensors: Our public licenses are
+     intended for use by those authorized to give the public
+     permission to use material in ways otherwise restricted by
+     copyright and certain other rights. Our licenses are
+     irrevocable. Licensors should read and understand the terms
+     and conditions of the license they choose before applying it.
+     Licensors should also secure all rights necessary before
+     applying our licenses so that the public can reuse the
+     material as expected. Licensors should clearly mark any
+     material not subject to the license. This includes other CC-
+     licensed material, or material used under an exception or
+     limitation to copyright. More considerations for licensors:
+	wiki.creativecommons.org/Considerations_for_licensors
+
+     Considerations for the public: By using one of our public
+     licenses, a licensor grants the public permission to use the
+     licensed material under specified terms and conditions. If
+     the licensor's permission is not necessary for any reason--for
+     example, because of any applicable exception or limitation to
+     copyright--then that use is not regulated by the license. Our
+     licenses grant only permissions under copyright and certain
+     other rights that a licensor has authority to grant. Use of
+     the licensed material may still be restricted for other
+     reasons, including because others have copyright or other
+     rights in the material. A licensor may make special requests,
+     such as asking that all changes be marked or described.
+     Although not required by our licenses, you are encouraged to
+     respect those requests where reasonable. More_considerations
+     for the public:
+	wiki.creativecommons.org/Considerations_for_licensees
+
+=======================================================================
+
+Creative Commons Attribution 4.0 International Public License
+
+By exercising the Licensed Rights (defined below), You accept and agree
+to be bound by the terms and conditions of this Creative Commons
+Attribution 4.0 International Public License ("Public License"). To the
+extent this Public License may be interpreted as a contract, You are
+granted the Licensed Rights in consideration of Your acceptance of
+these terms and conditions, and the Licensor grants You such rights in
+consideration of benefits the Licensor receives from making the
+Licensed Material available under these terms and conditions.
+
+
+Section 1 -- Definitions.
+
+  a. Adapted Material means material subject to Copyright and Similar
+     Rights that is derived from or based upon the Licensed Material
+     and in which the Licensed Material is translated, altered,
+     arranged, transformed, or otherwise modified in a manner requiring
+     permission under the Copyright and Similar Rights held by the
+     Licensor. For purposes of this Public License, where the Licensed
+     Material is a musical work, performance, or sound recording,
+     Adapted Material is always produced where the Licensed Material is
+     synched in timed relation with a moving image.
+
+  b. Adapter's License means the license You apply to Your Copyright
+     and Similar Rights in Your contributions to Adapted Material in
+     accordance with the terms and conditions of this Public License.
+
+  c. Copyright and Similar Rights means copyright and/or similar rights
+     closely related to copyright including, without limitation,
+     performance, broadcast, sound recording, and Sui Generis Database
+     Rights, without regard to how the rights are labeled or
+     categorized. For purposes of this Public License, the rights
+     specified in Section 2(b)(1)-(2) are not Copyright and Similar
+     Rights.
+
+  d. Effective Technological Measures means those measures that, in the
+     absence of proper authority, may not be circumvented under laws
+     fulfilling obligations under Article 11 of the WIPO Copyright
+     Treaty adopted on December 20, 1996, and/or similar international
+     agreements.
+
+  e. Exceptions and Limitations means fair use, fair dealing, and/or
+     any other exception or limitation to Copyright and Similar Rights
+     that applies to Your use of the Licensed Material.
+
+  f. Licensed Material means the artistic or literary work, database,
+     or other material to which the Licensor applied this Public
+     License.
+
+  g. Licensed Rights means the rights granted to You subject to the
+     terms and conditions of this Public License, which are limited to
+     all Copyright and Similar Rights that apply to Your use of the
+     Licensed Material and that the Licensor has authority to license.
+
+  h. Licensor means the individual(s) or entity(ies) granting rights
+     under this Public License.
+
+  i. Share means to provide material to the public by any means or
+     process that requires permission under the Licensed Rights, such
+     as reproduction, public display, public performance, distribution,
+     dissemination, communication, or importation, and to make material
+     available to the public including in ways that members of the
+     public may access the material from a place and at a time
+     individually chosen by them.
+
+  j. Sui Generis Database Rights means rights other than copyright
+     resulting from Directive 96/9/EC of the European Parliament and of
+     the Council of 11 March 1996 on the legal protection of databases,
+     as amended and/or succeeded, as well as other essentially
+     equivalent rights anywhere in the world.
+
+  k. You means the individual or entity exercising the Licensed Rights
+     under this Public License. Your has a corresponding meaning.
+
+
+Section 2 -- Scope.
+
+  a. License grant.
 
-# Python Style Guide
+       1. Subject to the terms and conditions of this Public License,
+          the Licensor hereby grants You a worldwide, royalty-free,
+          non-sublicensable, non-exclusive, irrevocable license to
+          exercise the Licensed Rights in the Licensed Material to:
 
-Comprehensive guidelines for writing clean, maintainable Python code based on [Google's Python Style Guide](https://google.github.io/styleguide/pyguide.html).
-
-## Core Philosophy
+            a. reproduce and Share the Licensed Material, in whole or
+               in part; and
 
-**BE CONSISTENT.** Match the style of the code around you. Use these guidelines as defaults, but always prioritize consistency with existing code.
+            b. produce, reproduce, and Share Adapted Material.
 
-## Language Rules
+       2. Exceptions and Limitations. For the avoidance of doubt, where
+          Exceptions and Limitations apply to Your use, this Public
+          License does not apply, and You do not need to comply with
+          its terms and conditions.
+
+       3. Term. The term of this Public License is specified in Section
+          6(a).
+
+       4. Media and formats; technical modifications allowed. The
+          Licensor authorizes You to exercise the Licensed Rights in
+          all media and formats whether now known or hereafter created,
+          and to make technical modifications necessary to do so. The
+          Licensor waives and/or agrees not to assert any right or
+          authority to forbid You from making technical modifications
+          necessary to exercise the Licensed Rights, including
+          technical modifications necessary to circumvent Effective
+          Technological Measures. For purposes of this Public License,
+          simply making modifications authorized by this Section 2(a)
+          (4) never produces Adapted Material.
 
-### Imports
+       5. Downstream recipients.
 
-Use `import` statements for packages and modules in application code to avoid circular dependencies. For standard library and third-party packages, importing classes is acceptable.
+            a. Offer from the Licensor -- Licensed Material. Every
+               recipient of the Licensed Material automatically
+               receives an offer from the Licensor to exercise the
+               Licensed Rights under the terms and conditions of this
+               Public License.
 
-**Yes:**
-```python
-from pydantic import BaseModel  # Third-party: Class import OK
-from pathlib import Path        # Stdlib: Class import OK
-import sound_effects.utils      # App: Module import
-from myproject import config    # App: Module import
-```
-
-**No:**
-```python
-from myproject.utils import heavy_function  # App: Avoid direct function import if circular dep risk
-```
+            b. No downstream restrictions. You may not offer or impose
+               any additional or different terms or conditions on, or
+               apply any Effective Technological Measures to, the
+               Licensed Material if doing so restricts exercise of the
+               Licensed Rights by any recipient of the Licensed
+               Material.
 
-#### Import Formatting
+       6. No endorsement. Nothing in this Public License constitutes or
+          may be construed as permission to assert or imply that You
+          are, or that Your use of the Licensed Material is, connected
+          with, or sponsored, endorsed, or granted official status by,
+          the Licensor or others designated to receive attribution as
+          provided in Section 3(a)(1)(A)(i).
 
-- Group imports: standard library, third-party, application-specific
-- Alphabetize within each group
-- Use absolute imports (not relative imports)
-- One import per line (except for multiple items from `typing` or `collections.abc`)
+  b. Other rights.
 
-```python
-# Standard library
-import os
-import sys
-
-# Third-party
-import numpy as np
-import tensorflow as tf
-
-# Application-specific
-from myproject.backend import api_utils
-```
-
-### Exceptions
-
-Use exceptions appropriately. Do not suppress errors with bare `except:` clauses.
-
-**Yes:**
-```python
-try:
-    result = risky_operation()
-except ValueError as e:
-    logging.error(f"Invalid value: {e}")
-    raise
-```
-
-**No:**
-```python
-try:
-    result = risky_operation()
-except:  # Too broad, hides bugs
-    pass
-```
+       1. Moral rights, such as the right of integrity, are not
+          licensed under this Public License, nor are publicity,
+          privacy, and/or other similar personality rights; however, to
+          the extent possible, the Licensor waives and/or agrees not to
+          assert any such rights held by the Licensor to the limited
+          extent necessary to allow You to exercise the Licensed
+          Rights, but not otherwise.
 
-### Type Annotations
+       2. Patent and trademark rights are not licensed under this
+          Public License.
 
-Annotate all function signatures. Type annotations improve code readability and catch errors early.
+       3. To the extent possible, the Licensor waives any right to
+          collect royalties from You for the exercise of the Licensed
+          Rights, whether directly or through a collecting society
+          under any voluntary or waivable statutory or compulsory
+          licensing scheme. In all other cases the Licensor expressly
+          reserves any right to collect such royalties.
+
+
+Section 3 -- License Conditions.
+
+Your exercise of the Licensed Rights is expressly made subject to the
+following conditions.
+
+  a. Attribution.
 
-**General rules:**
-- Annotate all public APIs
-- Use built-in types (`list`, `dict`, `set`) instead of `typing.List`, etc. (Python 3.9+)
-- Import typing symbols directly: `from typing import Any, Union`
-- Use `None` instead of `type(None)` or `NoneType`
+       1. If You Share the Licensed Material (including in modified
+          form), You must:
+
+            a. retain the following if it is supplied by the Licensor
+               with the Licensed Material:
+
+                 i. identification of the creator(s) of the Licensed
+                    Material and any others designated to receive
+                    attribution, in any reasonable manner requested by
+                    the Licensor (including by pseudonym if
+                    designated);
 
-```python
-def fetch_data(url: str, timeout: int = 30) -> dict[str, Any]:
-    """Fetch data from URL."""
-    ...
+                ii. a copyright notice;
 
-def process_items(items: list[str]) -> None:
-    """Process a list of items."""
-    ...
-```
+               iii. a notice that refers to this Public License;
 
-### Default Argument Values
+                iv. a notice that refers to the disclaimer of
+                    warranties;
 
-Never use mutable objects as default values in function definitions.
+                 v. a URI or hyperlink to the Licensed Material to the
+                    extent reasonably practicable;
 
-**Yes:**
-```python
-def foo(a: int, b: list[int] | None = None) -> None:
-    if b is None:
-        b = []
-```
+            b. indicate if You modified the Licensed Material and
+               retain an indication of any previous modifications; and
 
-**No:**
-```python
-def foo(a: int, b: list[int] = []) -> None:  # Mutable default - WRONG!
-    b.append(a)
-```
-
-### True/False Evaluations
+            c. indicate the Licensed Material is licensed under this
+               Public License, and include the text of, or the URI or
+               hyperlink to, this Public License.
 
-Use implicit false where possible. Empty sequences, `None`, and `0` are false in boolean contexts.
+       2. You may satisfy the conditions in Section 3(a)(1) in any
+          reasonable manner based on the medium, means, and context in
+          which You Share the Licensed Material. For example, it may be
+          reasonable to satisfy the conditions by providing a URI or
+          hyperlink to a resource that includes the required
+          information.
 
-**Yes:**
-```python
-if not users:  # Preferred
-if not some_dict:
-if value:
-```
+       3. If requested by the Licensor, You must remove any of the
+          information required by Section 3(a)(1)(A) to the extent
+          reasonably practicable.
 
-**No:**
-```python
-if len(users) == 0:  # Verbose
-if users == []:
-if value == True:  # Never compare to True/False explicitly
-```
+       4. If You Share Adapted Material You produce, the Adapter's
+          License You apply must not prevent recipients of the Adapted
+          Material from complying with this Public License.
 
-### Comprehensions & Generators
 
-Use comprehensions and generators for simple cases. Keep them readable.
+Section 4 -- Sui Generis Database Rights.
 
-**Yes:**
-```python
-result = [x for x in data if x > 0]
-squares = (x**2 for x in range(10))
-```
-
-**No:**
-```python
-# Too complex
-result = [
-    x.strip().lower() for x in data 
-    if x and len(x) > 5 and not x.startswith('#')
-    for y in x.split(',') if y
-]  # Use a regular loop instead
-```
-
-### Lambda Functions
-
-Use lambdas for one-liners only. For anything complex, define a proper function.
-
-**Yes:**
-```python
-sorted(data, key=lambda x: x.timestamp)
-```
-
-**Acceptable but prefer named function:**
-```python
-def get_timestamp(item):
-    return item.timestamp
-
-sorted(data, key=get_timestamp)
-```
-
-## Style Rules
-
-### Line Length
-
-Maximum line length: 88 characters. Exceptions allowed for imports, URLs, and long strings that can't be broken.
-
-### Indentation
-
-Use 4 spaces per indentation level. Never use tabs.
-
-For hanging indents, align wrapped elements vertically or use 4-space hanging indent:
-
-```python
-# Aligned with opening delimiter
-foo = long_function_name(var_one, var_two,
-                         var_three, var_four)
-
-# Hanging indent (4 spaces)
-foo = long_function_name(
-    var_one, var_two, var_three,
-    var_four)
-```
-
-### Blank Lines
-
-- Two blank lines between top-level definitions
-- One blank line between method definitions
-- Use blank lines sparingly within functions to show logical sections
-
-### Naming Conventions
-
-| Type | Convention | Examples |
-|------|-----------|----------|
-| Packages/Modules | `lower_with_under` | `my_module.py` |
-| Classes | `CapWords` | `MyClass` |
-| Functions/Methods | `lower_with_under()` | `my_function()` |
-| Constants | `CAPS_WITH_UNDER` | `MAX_SIZE` |
-| Variables | `lower_with_under` | `my_var` |
-| Private | `_leading_underscore` | `_private_var` |
-
-**Avoid:**
-- Single character names except for counters/iterators (`i`, `j`, `k`)
-- Dashes in any name
-- `__double_leading_and_trailing_underscore__` (reserved for Python)
-
-### Comments and Docstrings
+Where the Licensed Rights include Sui Generis Database Rights that
+apply to Your use of the Licensed Material:
 
-#### Docstring Format
+  a. for the avoidance of doubt, Section 2(a)(1) grants You the right
+     to extract, reuse, reproduce, and Share all or a substantial
+     portion of the contents of the database;
 
-Use Google-style docstrings for all public modules, functions, classes, and methods.
+  b. if You include all or a substantial portion of the database
+     contents in a database in which You have Sui Generis Database
+     Rights, then the database in which You have Sui Generis Database
+     Rights (but not its individual contents) is Adapted Material; and
 
-**Function docstring:**
-```python
-def fetch_smalltable_rows(
-    table_handle: smalltable.Table,
-    keys: Sequence[bytes | str],
-    require_all_keys: bool = False,
-) -> Mapping[bytes, tuple[str, ...]]:
-    """Fetches rows from a Smalltable.
+  c. You must comply with the conditions in Section 3(a) if You Share
+     all or a substantial portion of the contents of the database.
 
-    Retrieves rows pertaining to the given keys from the Table instance
-    represented by table_handle. String keys will be UTF-8 encoded.
+For the avoidance of doubt, this Section 4 supplements and does not
+replace Your obligations under this Public License where the Licensed
+Rights include other Copyright and Similar Rights.
 
-    Args:
-        table_handle: An open smalltable.Table instance.
-        keys: A sequence of strings representing the key of each table
-            row to fetch. String keys will be UTF-8 encoded.
-        require_all_keys: If True, raise ValueError if any key is missing.
 
-    Returns:
-        A dict mapping keys to the corresponding table row data
-        fetched. Each row is represented as a tuple of strings.
+Section 5 -- Disclaimer of Warranties and Limitation of Liability.
 
-    Raises:
-        IOError: An error occurred accessing the smalltable.
-        ValueError: A key is missing and require_all_keys is True.
-    """
-    ...
-```
+  a. UNLESS OTHERWISE SEPARATELY UNDERTAKEN BY THE LICENSOR, TO THE
+     EXTENT POSSIBLE, THE LICENSOR OFFERS THE LICENSED MATERIAL AS-IS
+     AND AS-AVAILABLE, AND MAKES NO REPRESENTATIONS OR WARRANTIES OF
+     ANY KIND CONCERNING THE LICENSED MATERIAL, WHETHER EXPRESS,
+     IMPLIED, STATUTORY, OR OTHER. THIS INCLUDES, WITHOUT LIMITATION,
+     WARRANTIES OF TITLE, MERCHANTABILITY, FITNESS FOR A PARTICULAR
+     PURPOSE, NON-INFRINGEMENT, ABSENCE OF LATENT OR OTHER DEFECTS,
+     ACCURACY, OR THE PRESENCE OR ABSENCE OF ERRORS, WHETHER OR NOT
+     KNOWN OR DISCOVERABLE. WHERE DISCLAIMERS OF WARRANTIES ARE NOT
+     ALLOWED IN FULL OR IN PART, THIS DISCLAIMER MAY NOT APPLY TO YOU.
 
-**Class docstring:**
-```python
-class SampleClass:
-    """Summary of class here.
+  b. TO THE EXTENT POSSIBLE, IN NO EVENT WILL THE LICENSOR BE LIABLE
+     TO YOU ON ANY LEGAL THEORY (INCLUDING, WITHOUT LIMITATION,
+     NEGLIGENCE) OR OTHERWISE FOR ANY DIRECT, SPECIAL, INDIRECT,
+     INCIDENTAL, CONSEQUENTIAL, PUNITIVE, EXEMPLARY, OR OTHER LOSSES,
+     COSTS, EXPENSES, OR DAMAGES ARISING OUT OF THIS PUBLIC LICENSE OR
+     USE OF THE LICENSED MATERIAL, EVEN IF THE LICENSOR HAS BEEN
+     ADVISED OF THE POSSIBILITY OF SUCH LOSSES, COSTS, EXPENSES, OR
+     DAMAGES. WHERE A LIMITATION OF LIABILITY IS NOT ALLOWED IN FULL OR
+     IN PART, THIS LIMITATION MAY NOT APPLY TO YOU.
 
-    Longer class information...
-    Longer class information...
+  c. The disclaimer of warranties and limitation of liability provided
+     above shall be interpreted in a manner that, to the extent
+     possible, most closely approximates an absolute disclaimer and
+     waiver of all liability.
 
-    Attributes:
-        likes_spam: A boolean indicating if we like SPAM or not.
-        eggs: An integer count of the eggs we have laid.
-    """
 
-    def __init__(self, likes_spam: bool = False):
-        """Initializes the instance based on spam preference.
+Section 6 -- Term and Termination.
 
-        Args:
-            likes_spam: Defines if instance exhibits this preference.
-        """
-        self.likes_spam = likes_spam
-        self.eggs = 0
-```
+  a. This Public License applies for the term of the Copyright and
+     Similar Rights licensed here. However, if You fail to comply with
+     this Public License, then Your rights under this Public License
+     terminate automatically.
 
-#### Block and Inline Comments
+  b. Where Your right to use the Licensed Material has terminated under
+     Section 6(a), it reinstates:
 
-- Use complete sentences with proper capitalization
-- Block comments indent to the same level as the code
-- Inline comments should be separated by at least 2 spaces
-- Use inline comments sparingly
+       1. automatically as of the date the violation is cured, provided
+          it is cured within 30 days of Your discovery of the
+          violation; or
 
-```python
-# Block comment explaining the following code.
-# Can span multiple lines.
-x = x + 1  # Inline comment (use sparingly)
-```
+       2. upon express reinstatement by the Licensor.
 
-### Strings
+     For the avoidance of doubt, this Section 6(b) does not affect any
+     right the Licensor may have to seek remedies for Your violations
+     of this Public License.
 
-Use f-strings for formatting (Python 3.6+).
+  c. For the avoidance of doubt, the Licensor may also offer the
+     Licensed Material under separate terms or conditions or stop
+     distributing the Licensed Material at any time; however, doing so
+     will not terminate this Public License.
 
-**Yes:**
-```python
-x = f"name: {name}; score: {score}"
-```
+  d. Sections 1, 5, 6, 7, and 8 survive termination of this Public
+     License.
 
-**Acceptable:**
-```python
-x = "name: %s; score: %d" % (name, score)
-x = "name: {}; score: {}".format(name, score)
-```
 
-**No:**
-```python
-x = "name: " + name + "; score: " + str(score)  # Avoid + for formatting
-```
+Section 7 -- Other Terms and Conditions.
 
-#### Logging
+  a. The Licensor shall not be bound by any additional or different
+     terms or conditions communicated by You unless expressly agreed.
 
-Use **Loguru** for logging with brace-style lazy formatting:
+  b. Any arrangements, understandings, or agreements regarding the
+     Licensed Material not stated herein are separate from and
+     independent of the terms and conditions of this Public License.
 
-```python
-logger.info("Request from {} resulted in {}", ip_address, status_code)
-```
 
-**Avoid** standard `logging` with `%` formatting.
+Section 8 -- Interpretation.
 
-### Files and Resources
+  a. For the avoidance of doubt, this Public License does not, and
+     shall not be interpreted to, reduce, limit, restrict, or impose
+     conditions on any use of the Licensed Material that could lawfully
+     be made without permission under this Public License.
 
-For simple text operations, prefer `pathlib` methods:
+  b. To the extent possible, if any provision of this Public License is
+     deemed unenforceable, it shall be automatically reformed to the
+     minimum extent necessary to make it enforceable. If the provision
+     cannot be reformed, it shall be severed from this Public License
+     without affecting the enforceability of the remaining terms and
+     conditions.
 
-```python
-data = Path("file.txt").read_text()
-Path("output.txt").write_text("content")
-```
+  c. No term or condition of this Public License will be waived and no
+     failure to comply consented to unless expressly agreed to by the
+     Licensor.
 
-For complex operations or non-text files, use context managers:
+  d. Nothing in this Public License constitutes or may be interpreted
+     as a limitation upon, or waiver of, any privileges and immunities
+     that apply to the Licensor or You, including from the legal
+     processes of any jurisdiction or authority.
 
-```python
-with open("image.png", "rb") as f:
-    data = f.read()
-```
 
-### Statements
+=======================================================================
 
-Generally avoid multiple statements on one line.
+Creative Commons is not a party to its public
+licenses. Notwithstanding, Creative Commons may elect to apply one of
+its public licenses to material it publishes and in those instances
+will be considered the “Licensor.” The text of the Creative Commons
+public licenses is dedicated to the public domain under the CC0 Public
+Domain Dedication. Except for the limited purpose of indicating that
+material is shared under a Creative Commons public license or as
+otherwise permitted by the Creative Commons policies published at
+creativecommons.org/policies, Creative Commons does not authorize the
+use of the trademark "Creative Commons" or any other trademark or logo
+of Creative Commons without its prior written consent including,
+without limitation, in connection with any unauthorized modifications
+to any of its public licenses or any other arrangements,
+understandings, or agreements concerning use of licensed material. For
+the avoidance of doubt, this paragraph does not form part of the
+public licenses.
 
-**Yes:**
-```python
-if foo:
-    bar()
-```
-
-**No:**
-```python
-if foo: bar()  # Avoid
-```
-
-### Main
-
-For executable scripts, use:
-
-```python
-def main():
-    ...
-
-if __name__ == "__main__":
-    main()
-```
-
-### Function Length
-
-Keep functions focused and reasonably sized. If a function exceeds about 40 lines, consider splitting it unless it remains very readable.
-
-## Type Annotation Details
-
-### Forward Declarations
-
-Use string quotes for forward references:
-
-```python
-class MyClass:
-    def method(self) -> "MyClass":
-        return self
-```
-
-### Type Aliases
-
-Create aliases for complex types:
-
-```python
-from typing import TypeAlias
-
-ConnectionOptions: TypeAlias = dict[str, str]
-Address: TypeAlias = tuple[str, int]
-Server: TypeAlias = tuple[Address, ConnectionOptions]
-```
-
-### TypeVars
-
-Use descriptive names for TypeVars:
-
-```python
-from typing import TypeVar
-
-_T = TypeVar("_T")  # Good: private, unconstrained
-AddableType = TypeVar("AddableType", int, float, str)  # Good: descriptive
-```
-
-### Generics
-
-Always specify type parameters for generic types:
-
-**Yes:**
-```python
-def get_names(employee_ids: list[int]) -> dict[int, str]:
-    ...
-```
-
-**No:**
-```python
-def get_names(employee_ids: list) -> dict:  # Missing type parameters
-    ...
-```
-
-### Imports for Typing
-
-Import typing symbols directly:
-
-```python
-from collections.abc import Mapping, Sequence
-from typing import Any, Union
-
-# Use built-in types for containers (Python 3.9+)
-def foo(items: list[str]) -> dict[str, int]:
-    ...
-```
-
-## Modern Python Features
-
-### Match Statements (Python 3.10+)
-
-Use structural pattern matching for complex conditionals:
-
-```python
-def handle_response(response: dict) -> str:
-    match response:
-        case {"status": "ok", "data": data}:
-            return f"Success: {data}"
-        case {"status": "error", "message": msg}:
-            return f"Error: {msg}"
-        case {"status": status}:
-            return f"Unknown status: {status}"
-        case _:
-            return "Invalid response"
-```
-
-Pattern matching with types:
-
-```python
-def process(value: int | str | list) -> str:
-    match value:
-        case int(n) if n > 0:
-            return f"Positive int: {n}"
-        case int(n):
-            return f"Non-positive int: {n}"
-        case str(s):
-            return f"String: {s}"
-        case [first, *rest]:
-            return f"List starting with {first}"
-```
-
-### Dataclasses with Slots (Python 3.10+)
-
-Use `slots=True` for memory efficiency and faster attribute access:
-
-```python
-from dataclasses import dataclass
-
-@dataclass(slots=True)
-class Point:
-    x: float
-    y: float
-
-@dataclass(slots=True, frozen=True)
-class ImmutableConfig:
-    host: str
-    port: int
-    timeout: float = 30.0
-```
-
-### Postponed Annotation Evaluation
-
-Use `from __future__ import annotations` for:
-- Forward references without quotes
-- Faster module import (annotations not evaluated at definition time)
-
-```python
-from __future__ import annotations
-
-class Node:
-    def __init__(self, children: list[Node]) -> None:  # No quotes needed
-        self.children = children
-
-    def add_child(self, child: Node) -> None:
-        self.children.append(child)
-```
-
-### Exception Groups (Python 3.11+)
-
-Handle multiple exceptions simultaneously:
-
-```python
-try:
-    async with asyncio.TaskGroup() as tg:
-        tg.create_task(task1())
-        tg.create_task(task2())
-except* ValueError as eg:
-    for exc in eg.exceptions:
-        logger.error("ValueError: {}", exc)
-except* TypeError as eg:
-    for exc in eg.exceptions:
-        logger.error("TypeError: {}", exc)
-```
-
-## Common Patterns
-
-### Properties
-
-Use properties for simple attribute access:
-
-```python
-class Square:
-    def __init__(self, side: float):
-        self._side = side
-    
-    @property
-    def area(self) -> float:
-        return self._side ** 2
-```
-
-### Conditional Expressions
-
-Use ternary operators for simple conditions:
-
-```python
-x = "yes" if condition else "no"
-```
-
-### Context Managers
-
-Create custom context managers when appropriate:
-
-```python
-from contextlib import contextmanager
-
-@contextmanager
-def managed_resource(*args, **kwargs):
-    resource = acquire_resource(*args, **kwargs)
-    try:
-        yield resource
-    finally:
-        release_resource(resource)
-```
-
-## Linting
-
-Run `ruff` on all Python code. Suppress warnings only when necessary:
-
-```python
-dict = 'something'  # noqa: A001
-```
-
-### Package `__init__.py` Files
-
-**THERE MUST BE NO CODE IN `__init__.py` FILES.** Keep them empty.
-
-```python
-# __init__.py
-# This file should be empty
-```
-
-Import from modules directly:
-```python
-# Instead of: from mypackage import MyClass
-# Use: from mypackage.core import MyClass
-```
-
-### Preferred Libraries
-
-Use these libraries when applicable:
-
-| Purpose | Library |
-|---------|---------|
-| Data validation/models | `pydantic` |
-| Logging | `loguru` |
-| CLI | `cyclopts`, `rich` |
-| Testing | `pytest`, `pytest-mock` |
-
-## Summary
-
-When writing Python code:
-
-1. Use type annotations for all functions
-2. Follow naming conventions consistently
-3. Write clear docstrings for all public APIs
-4. Keep functions focused and reasonably sized
-5. Use comprehensions for simple cases
-6. Prefer implicit false in boolean contexts
-7. Use f-strings for formatting
-8. Always use context managers for resources
-9. Run `ruff check` and `ruff format`
-10. Keep `__init__.py` files empty
-11. **BE CONSISTENT** with existing code
-
-## Additional Resources
-
-For detailed reference on specific topics, see:
-
-- **references/advanced_types.md** - Advanced type annotation patterns including Protocol, TypedDict, Literal, ParamSpec, and more
-- **references/antipatterns.md** - Common Python mistakes and their fixes
-- **references/docstring_examples.md** - Comprehensive docstring examples for all Python constructs
+Creative Commons may be contacted at creativecommons.org.
