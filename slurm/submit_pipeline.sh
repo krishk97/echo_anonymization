@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#! /bin/bash -l
 # Submit the full pipeline: Script 1, then Script 2 (GPU) once Script 1 has finished successfully.
 # Run from the repo root:  slurm/submit_pipeline.sh [configs/config.yaml]
 set -euo pipefail
