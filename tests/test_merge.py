@@ -1,4 +1,4 @@
-"""Tests for Script 2 `merge`: final record list, study list and results cleanup."""
+"""Tests for Script 2 `merge`: final video/image tables, study list, cleanup."""
 
 import datetime as dt
 from collections.abc import Callable
@@ -41,43 +41,51 @@ def setup(dicom_tree: DicomTree, make_cfg: MakeCfg) -> dict[str, Any]:
 def test_merge_dedupes_and_keeps_only_allowed_columns(
     dicom_tree: DicomTree, make_cfg: MakeCfg
 ) -> None:
-    """The final table has one row per record and only allowlisted columns, no PHI.
+    """Each final table has one row per record and only its allowlisted columns.
 
     Args:
         dicom_tree: The synthetic tree fixture.
         make_cfg: The config factory fixture.
     """
     cfg = setup(dicom_tree, make_cfg)
-    table = script2.merge(cfg)
+    videos, images = script2.merge(cfg)
     out = Path(cfg["paths"]["output_root"])
-    assert table.equals(pd.read_parquet(out / "echo-record-list.parquet"))
+    assert videos.equals(pd.read_parquet(out / "echo-video-list.parquet"))
+    assert images.equals(pd.read_parquet(out / "echo-image-list.parquet"))
+    assert len(videos) and len(images)
+    table = pd.concat([videos, images], ignore_index=True)
     studies = pd.read_csv(out / "echo-study-list.csv")
     assert list(studies.columns) == ["PatientID", "StudyID", "StudyDateTime"]
     assert set(studies["StudyID"]) == set(table["StudyID"])
 
-    manifest = pd.concat(
-        pd.read_parquet(p)
-        for p in (Path(cfg["paths"]["secure_dir"]) / "manifest").glob("*.parquet")
-    )
+    manifest = read_parquet_dir(Path(cfg["paths"]["secure_dir"]) / "manifest")
     assert table["RecordID"].is_unique and len(table) == len(manifest)
     # The retried error was superseded by the later row.
     assert (table["Status"] == "success").all()
 
     icfg = cfg["index"]
-    allowed = (
+    common = (
         set(script2.MANIFEST_KEEP)
         | set(script2.RESULT_KEEP)
         | set(icfg["metadata_allowlist"])
     )
-    allowed |= {f"{k}Shifted" for k in icfg["date_fields"]}
+    common |= {f"{k}Shifted" for k in icfg["date_fields"]}
     # Renamed at merge.
-    allowed -= {"AnonPatientID", "AnonStudyID", "OutputPath"}
-    allowed |= {"PatientID", "StudyID", "FilePath"}
-    non_model = {
-        c for c in table.columns if not c.startswith(script2.MODEL_COL_PREFIXES)
-    }
-    assert not non_model - allowed
-    assert "SourcePath" not in table.columns and "OutputPath" not in table.columns
+    common -= {"AnonPatientID", "AnonStudyID", "OutputPath"}
+    common |= {"PatientID", "StudyID", "FilePath"}
+    for t, type_keep in ((videos, script2.VIDEO_KEEP), (images, script2.IMAGE_KEEP)):
+        non_model = {
+            c for c in t.columns if not c.startswith(script2.MODEL_COL_PREFIXES)
+        }
+        assert not non_model - common - set(type_keep)
+        assert not {"SourcePath", "OutputPath", "ItemType"} & set(t.columns)
+    # Each table holds only its own type's region columns.
+    assert not {"BBox2DX0", "BBox1DX0", "PhysicalDeltaX2D"} & set(videos.columns)
+    assert not {"BBoxX0", "RegionIndex", "FPS", "PhysicalDeltaX"} & set(images.columns)
+    assert {"RegionIndex2D", "PhysicalDeltaX2D", "PhysicalDeltaY1D"} <= set(
+        images.columns
+    )
+    assert {"RegionIndex", "PhysicalDeltaX"} <= set(videos.columns)
     assert table.set_index("RecordID")["FilePath"].equals(
         manifest.set_index("RecordID")["OutputPath"].loc[table["RecordID"]]
     )
@@ -158,7 +166,7 @@ def test_acquisition_datetime_shifted_with_crosswalk_offset(
         make_cfg: The config factory fixture.
     """
     cfg = setup(dicom_tree, make_cfg)
-    table = script2.merge(cfg)
+    table = pd.concat(script2.merge(cfg))
     cw = crosswalk(cfg)
     for rec in table.itertuples():
         real = cw.loc[rec.StudyID]
@@ -182,7 +190,8 @@ def test_complete_merge_deletes_results(
     out = Path(cfg["paths"]["output_root"])
     script2.merge(cfg)
     assert not (out / "results").exists()
-    assert (out / "echo-record-list.parquet").exists()
+    assert (out / "echo-video-list.parquet").exists()
+    assert (out / "echo-image-list.parquet").exists()
     assert (out / "echo-study-list.csv").exists()
 
 
@@ -199,7 +208,7 @@ def test_merge_with_errors_keeps_results(
     cfg["preprocess"].update(num_workers=0, flush_every=3, num_gpus=2)
     script1.main(cfg)
     run_all(cfg, stub_models(fail_item=[1]))
-    table = script2.merge(cfg)
+    table = pd.concat(script2.merge(cfg))
     assert (table["Status"] == "error").sum() == 1
     assert (Path(cfg["paths"]["output_root"]) / "results").is_dir()
 
@@ -224,6 +233,6 @@ def test_pipeline_version_bump_requeues_and_keeps_results(
 
     run_all(cfg, stub_models())
     assert script2.pending_records(cfg, retry_errors=False).empty
-    table = script2.merge(cfg)
+    table = pd.concat(script2.merge(cfg))
     assert (table["PipelineVersion"] == "v2").all()
     assert not (Path(cfg["paths"]["output_root"]) / "results").exists()

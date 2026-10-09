@@ -4,7 +4,7 @@ Each record is decoded, cropped/masked, classified (EchoFine + EchoPrime) and sa
 
 Subcommands:
   run    process pending records with one spawned process per GPU
-  merge  combine result parts into the final anonymized results table
+  merge  combine result parts into the final anonymized video and image tables
 
 Restartable: the done set is every RecordID already in a result part (any status);
 `--retry-errors` re-queues records whose latest status is `error`. A result row is
@@ -38,7 +38,7 @@ from loguru import logger
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
-from src.dicom_utils import decode_frames, quiet_pydicom
+from src.dicom_utils import REGION_DETAIL_TAGS, decode_frames, quiet_pydicom
 from src.image_utils import (
     crop_and_scale,
     mask_outside_ultrasound_video,
@@ -62,27 +62,35 @@ BBOX_COLUMNS = [
     f"{p}{c}" for p in ("BBox", "BBox2D", "BBox1D") for c in ("X0", "Y0", "X1", "Y1")
 ]
 RECORD_FIELDS = ["RecordID", "OutputPath", "ItemType", "FPS", "Oversize"] + BBOX_COLUMNS
-# Manifest columns copied into the final table (besides the config allowlist and shifted
-# dates). This is a keep-list: SourcePath and anything else not listed here never reach
-# the final table.
+ITEM_TYPES = ("video", "image")
+
+
+def _region_columns(suffix: str) -> list[str]:
+    """Returns the manifest columns of one region ("" video, "2D"/"1D" image)."""
+    return [
+        f"RegionIndex{suffix}",
+        *(f"BBox{suffix}{c}" for c in ("X0", "Y0", "X1", "Y1")),
+        f"SpatialFormat{suffix}",
+        f"DataType{suffix}",
+        *(f"{t}{suffix}" for t in REGION_DETAIL_TAGS),
+    ]
+
+
+# Manifest columns copied into the final tables (besides the config allowlist and
+# shifted dates): MANIFEST_KEEP into both, plus VIDEO_KEEP / IMAGE_KEEP. These are
+# keep-lists: SourcePath and anything else not listed here never reach the final tables.
 MANIFEST_KEEP = [
     "RecordID",
     "AnonPatientID",
     "AnonStudyID",
     "OutputPath",
-    "ItemType",
     "SOPClass",
-    "NumFrames",
-    "FPS",
-    "RegionSource",
-    "RegionIndex",
-    "SpatialFormat",
-    "DataType",
-    "RegionsJSON",
     "DecodedBytes",
     "Oversize",
     "PatientAgeCapped",
-] + BBOX_COLUMNS
+]
+VIDEO_KEEP = ["NumFrames", "FPS", "RegionSource"] + _region_columns("")
+IMAGE_KEEP = _region_columns("2D") + _region_columns("1D")
 RESULT_KEEP = ["Status", "ErrorType", "PipelineVersion", "Timestamp"]
 # Prefixes of the view-classification columns written by summarize()
 MODEL_COL_PREFIXES = ("EchoFine_", "EchoPrime_", "View_", "ViewScore_")
@@ -625,6 +633,19 @@ def latest_results(results: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def read_manifests(cfg: dict[str, Any]) -> dict[str, pd.DataFrame]:
+    """Reads the video and image manifests.
+
+    Args:
+        cfg: The full config.
+
+    Returns:
+        {"video": video manifest, "image": image manifest}; either may be empty.
+    """
+    manifest_dir = Path(cfg["paths"]["secure_dir"]) / "manifest"
+    return {t: read_parquet_dir(manifest_dir / t) for t in ITEM_TYPES}
+
+
 def pending_records(
     cfg: dict[str, Any], retry_errors: bool, classify: bool = True
 ) -> pd.DataFrame:
@@ -639,9 +660,10 @@ def pending_records(
         classify: Also return records that were only preprocessed (no views).
 
     Returns:
-        The pending manifest rows.
+        The pending video and image manifest rows (columns of the other type are
+        NaN).
     """
-    manifest = read_parquet_dir(Path(cfg["paths"]["secure_dir"]) / "manifest")
+    manifest = pd.concat(read_manifests(cfg).values(), ignore_index=True)
     if not len(manifest):
         return manifest
     results = read_parquet_dir(Path(cfg["paths"]["output_root"]) / "results")
@@ -675,12 +697,9 @@ def shard_files(
     """
     groups = []
     for source_path, g in pending.groupby("SourcePath", sort=False):
-        recs = (
-            g[RECORD_FIELDS]
-            .astype(object)
-            .where(g[RECORD_FIELDS].notna(), None)
-            .to_dict("records")
-        )
+        # Videos have no image boxes and vice versa; a column may be missing entirely.
+        fields = g.reindex(columns=RECORD_FIELDS)
+        recs = fields.astype(object).where(fields.notna(), None).to_dict("records")
         groups.append((int(g["DecodedBytes"].iloc[0]), source_path, recs))
     groups.sort(key=lambda t: (-t[0], t[1]))
     return [[(src, recs) for _, src, recs in groups[r::n]] for r in range(n)]
@@ -750,10 +769,11 @@ def run(cfg: dict[str, Any], retry_errors: bool, log_level: str) -> bool:
 
 
 def study_list(table: pd.DataFrame, crosswalk_path: Path) -> pd.DataFrame:
-    """Builds the study list from the final record list.
+    """Builds the study list from the final tables.
 
     Args:
-        table: The final record list (with PatientID/StudyID already renamed).
+        table: The final video and image tables combined (with PatientID/StudyID
+            already renamed).
         crosswalk_path: The crosswalk CSV; only AnonStudyID and StudyTime are read.
 
     Returns:
@@ -791,78 +811,84 @@ def study_list(table: pd.DataFrame, crosswalk_path: Path) -> pd.DataFrame:
     )
 
 
-def merge(cfg: dict[str, Any]) -> pd.DataFrame:
-    """Combines result parts into the final record list and study list.
+def merge(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Combines result parts into the final video and image tables and study list.
 
-    Takes the latest row per RecordID, joined with the manifest's anonymized
-    metadata through an explicit keep-list (no source paths or real identifiers).
-    If every manifest record has a non-error result from the current
+    Takes the latest row per RecordID, joined with the video or image manifest's
+    anonymized metadata through an explicit keep-list (no source paths or real
+    identifiers). If every manifest record has a non-error result from the current
     `pipeline_version` with its media on disk, `results/` is deleted.
 
     Args:
         cfg: The full config.
 
     Returns:
-        The final record list (empty if there are no results).
+        (video table, image table); both empty if there are no results.
     """
     out_root = Path(cfg["paths"]["output_root"])
     results = read_parquet_dir(out_root / "results")
-    manifest = read_parquet_dir(Path(cfg["paths"]["secure_dir"]) / "manifest")
+    manifests = read_manifests(cfg)
     if not len(results):
         logger.info("No results to merge")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     results = latest_results(results)
     model_cols = [c for c in results.columns if c.startswith(MODEL_COL_PREFIXES)]
     icfg = cfg["index"]
-    keep = (
+    common = (
         MANIFEST_KEEP
         + [f"{k}Shifted" for k in icfg["date_fields"]]
         + list(icfg["metadata_allowlist"])
     )
-    keep = [c for c in dict.fromkeys(keep) if c in manifest.columns]
-    table = results[["RecordID"] + RESULT_KEEP + model_cols].merge(
-        manifest[keep], on="RecordID", how="left"
-    )
-    table = (
-        table[keep + RESULT_KEEP + model_cols]
-        .sort_values("RecordID")
-        .reset_index(drop=True)
-    )
-    # The anonymized IDs are the only patient/study IDs in the final outputs, so they
-    # drop the Anon prefix
-    table = table.rename(
-        columns={
-            "AnonPatientID": "PatientID",
-            "AnonStudyID": "StudyID",
-            "OutputPath": "FilePath",
-        }
-    )
-    atomic_write_parquet(table, out_root / "echo-record-list.parquet")
+    tables = {}
+    for item_type, type_keep in (("video", VIDEO_KEEP), ("image", IMAGE_KEEP)):
+        manifest = manifests[item_type]
+        keep = [c for c in dict.fromkeys(common + type_keep) if c in manifest.columns]
+        table = pd.DataFrame()
+        if keep:  # Empty if this run has no records of this type
+            table = results[["RecordID"] + RESULT_KEEP + model_cols].merge(
+                manifest[keep], on="RecordID", how="inner"
+            )
+            table = (
+                table[keep + RESULT_KEEP + model_cols]
+                .sort_values("RecordID")
+                .reset_index(drop=True)
+            )
+            # The anonymized IDs are the only patient/study IDs in the final
+            # outputs, so they drop the Anon prefix
+            table = table.rename(
+                columns={
+                    "AnonPatientID": "PatientID",
+                    "AnonStudyID": "StudyID",
+                    "OutputPath": "FilePath",
+                }
+            )
+        tables[item_type] = table
+        path = out_root / f"echo-{item_type}-list.parquet"
+        atomic_write_parquet(tables[item_type], path)
+        logger.info("Final {} table: {} records -> {}", item_type, len(table), path)
+
+    both = pd.concat(tables.values(), ignore_index=True)
     studies = study_list(
-        table, Path(cfg["paths"]["secure_dir"]) / "anonymization_crosswalk.csv"
+        both, Path(cfg["paths"]["secure_dir"]) / "anonymization_crosswalk.csv"
     )
     tmp = out_root / "echo-study-list.csv.tmp"
     studies.to_csv(tmp, index=False)
     os.replace(tmp, out_root / "echo-study-list.csv")
 
-    success = table["Status"].isin(["success", "preprocessed"])
+    success = both["Status"].isin(["success", "preprocessed"])
     missing = sum(
-        not (out_root / "files" / p).exists() for p in table.loc[success, "FilePath"]
+        not (out_root / "files" / p).exists() for p in both.loc[success, "FilePath"]
     )
-    errors = int((table["Status"] == "error").sum())
-    without_result = int((~manifest["RecordID"].isin(table["RecordID"])).sum())
+    errors = int((both["Status"] == "error").sum())
+    manifest_ids = pd.concat(manifests.values())["RecordID"]
+    without_result = int((~manifest_ids.isin(both["RecordID"])).sum())
     version = cfg["preprocess"]["pipeline_version"]
-    stale = int((table["PipelineVersion"] != version).sum())
-    logger.info(
-        "Final table: {} records -> {}",
-        len(table),
-        out_root / "echo-record-list.parquet",
-    )
+    stale = int((both["PipelineVersion"] != version).sum())
     logger.info(
         "Study list: {} studies -> {}", len(studies), out_root / "echo-study-list.csv"
     )
-    logger.info("QA counts by status: {}", table["Status"].value_counts().to_dict())
+    logger.info("QA counts by status: {}", both["Status"].value_counts().to_dict())
     logger.info("QA success records with missing media file: {}", missing)
     logger.info("QA manifest records without a result yet: {}", without_result)
     logger.info("QA records from another pipeline_version: {}", stale)
@@ -873,7 +899,7 @@ def merge(cfg: dict[str, Any]) -> pd.DataFrame:
     else:
         shutil.rmtree(out_root / "results")
         logger.info("Merge complete: deleted {}", out_root / "results")
-    return table
+    return tables["video"], tables["image"]
 
 
 def cli() -> None:

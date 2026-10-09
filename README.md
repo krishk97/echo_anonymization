@@ -6,8 +6,8 @@ Two-stage pipeline that turns a large collection of echocardiogram DICOMs into:
 
 1. a **study-level anonymization crosswalk** (`anonymization_crosswalk.csv`, append-only),
 2. **anonymized media**: `files/<AnonPatientID>/<AnonStudyID>/<name>.<png|avi>`,
-3. a **record list** (`echo-record-list.parquet`): one row per media record with anonymized metadata and the outputs of two
-   view classifiers,
+3. a **video list** (`echo-video-list.parquet`) and an **image list** (`echo-image-list.parquet`): one row per media
+   record with anonymized metadata, region data and the outputs of two view classifiers,
 4. a **study list** (`echo-study-list.csv`): one row per study.
 
 | Script | Hardware | What it does |
@@ -35,7 +35,7 @@ can identify a patient stays in the secure area (`paths.secure_dir`); only de-id
   (`PatientAgeCapped`).
 - **Other fields.** Only the header fields in `index.metadata_allowlist` are copied. Names, free text, institutions and
   private tags are never copied.
-- **Final tables.** `merge` builds the record and study lists through an explicit keep-list, so source paths and crosswalk
+- **Final tables.** `merge` builds the video, image and study lists through explicit keep-lists, so source paths and crosswalk
   fields never reach them.
 - **Logs** record counts and exception types only, never tag values or source DICOM paths. Paths under
   `paths.output_root` (e.g. where the final tables were written) can appear. pydicom's own log messages and warnings
@@ -57,7 +57,7 @@ version of each file is ever written to disk.
   `RegionDataType` = tissue, color flow or unknown (the same rule as videos), and `BBox1D*` the largest M-mode or spectral
   region (ties go to the lower region index). Either may be empty. If an image has several 2D
   or several 1D regions, only the largest of each kind is kept for masking; the others (e.g. the second panel of a
-  side-by-side layout) are masked out. All regions are still listed in `RegionsJSON`.
+  side-by-side layout) are masked out and not recorded.
   - No `SequenceOfUltrasoundRegions` → excluded (`excluded_no_image_region`), since nothing would say what to keep.
   - Neither box (e.g. only ECG or graphics regions) → excluded (`excluded_no_image_region`).
 
@@ -121,7 +121,7 @@ Everything is set in **`configs/config.yaml`**. Usually you only edit `paths:`.
 | `paths.dicom_root` | Raw DICOM root (searched recursively) |
 | `paths.dicom_extension` | Extension of the files to pick up (default `dcm`, case-insensitive) |
 | `paths.secure_dir` | **Contains PHI**: `anonymization_crosswalk.csv`, `manifest/`, `status/`, Script 1 logs. Restrict access. |
-| `paths.output_root` | Anonymized outputs: `files/`, `results/`, `echo-record-list.parquet`, `echo-study-list.csv`, Script 2 logs |
+| `paths.output_root` | Anonymized outputs: `files/`, `results/`, `echo-video-list.parquet`, `echo-image-list.parquet`, `echo-study-list.csv`, Script 2 logs |
 | `index.num_workers`, `index.chunk_size` | Header-reading pool size and files per chunk |
 | `index.sop_classes` | SOP classes to keep (default: the two ultrasound storage classes) |
 | `index.max_num_frames` | Files with more frames than this are excluded (`excluded_too_many_frames`); `null` = no limit |
@@ -200,12 +200,19 @@ sbatch slurm/02_run_preprocess_only.sbatch       [configs/config.yaml] [--retry-
 ### Secure area (`paths.secure_dir`), contains PHI
 
 - **`anonymization_crosswalk.csv`**: one row per study. The columns are `PatientID, PatientName, PatientSex, PatientAge, PatientBirthDate, AccessionNumber, StudyID, StudyInstanceUID, StudyDate, StudyTime, AnonPatientID, AnonStudyID, DateOffsetDays`.
-- **`manifest/chunk-NNNNNN.parquet`**: one row per media record. It includes the source DICOM path, so it must stay in the secure area. Each row has:
+- **`manifest/video/chunk-NNNNNN.parquet`** and **`manifest/image/chunk-NNNNNN.parquet`**: one row per media record, with videos and images in separate manifests. They include the source DICOM path, so they must stay in the secure area. Every row has:
   - `RecordID`, `OutputPath`, `SourcePath`, `AnonPatientID` and `AnonStudyID`
-  - `ItemType` (image/video), `SOPClass`, `NumFrames` and `FPS`
-  - region columns: `RegionIndex`, the `BBox*` / `BBox2D*` / `BBox1D*` boxes (`X0`, `Y0`, `X1`, `Y1`), `SpatialFormat`, `DataType`, `RegionSource` and `RegionsJSON`
+  - `ItemType` (image/video) and `SOPClass`
   - `DecodedBytes` and `Oversize`
   - the allowlisted metadata, the `*Shifted` dates and `PatientAgeCapped`
+
+  Region columns are all plain scalars (no lists or dicts). A region's columns are:
+  - `RegionIndex`, the `BBox*` box (`X0`, `Y0`, `X1`, `Y1`), `SpatialFormat` and `DataType`;
+  - its calibration tags: `PhysicalUnitsXDirection`, `PhysicalUnitsYDirection`, `PhysicalDeltaX`, `PhysicalDeltaY`, `ReferencePixelX0`, `ReferencePixelY0`, `TransducerFrequency` and `PulseRepetitionFrequency` (null if the tag is missing, and always null for a full-frame video record).
+
+  Video rows also have `NumFrames`, `FPS`, `RegionSource` and the columns of their one region, unsuffixed (`RegionIndex`, `BBoxX0`, `PhysicalDeltaX`, …).
+
+  Image rows have the same columns for each of their two regions, suffixed `2D` or `1D` (`RegionIndex2D`, `BBox2DX0`, `PhysicalDeltaX2D`, …, `RegionIndex1D`, `BBox1DX0`, `PhysicalDeltaY1D`, …). The columns of a missing region are null.
 - **`status/chunk-NNNNNN.parquet`**: one row per discovered file, recording its `SourcePath`, `Status`, `Detail` and `NumRecords`. The possible statuses are:
   - `included`
   - `excluded_sop_class`, where `Detail` holds the SOP class name; the run summary counts these by class
@@ -229,8 +236,8 @@ sbatch slurm/02_run_preprocess_only.sbatch       [configs/config.yaml] [--retry-
     - `EchoFine_View=<view>` / `EchoPrime_View=<view>`: the score for each view.
     - `View_EchoFine` / `View_EchoPrime`: the top-scoring view.
     - `ViewScore_EchoFine` / `ViewScore_EchoPrime`: that view's score.
-- **`echo-record-list.parquet`**: the final table, written by `merge`. It keeps the latest row per `RecordID`, joined with the manifest through an explicit keep-list. Rows of every status are kept (check `Status`; only `success` rows have view columns), and manifest records with no result yet are not in it. `AnonPatientID` / `AnonStudyID` are renamed to `PatientID` / `StudyID` here, since the final outputs hold no real IDs, and `OutputPath` is renamed to `FilePath` (relative to `files/`).
-- **`echo-study-list.csv`**: written by `merge`, one row per study in the record list, with columns `PatientID` (the anonymized `AnonPatientID`), `StudyID` (the anonymized `AnonStudyID`) and `StudyDateTime` (the shifted StudyDate plus the StudyTime; date only if StudyTime is missing).
+- **`echo-video-list.parquet`** and **`echo-image-list.parquet`**: the final tables, written by `merge`. Each keeps the latest row per `RecordID`, joined with its manifest through an explicit keep-list. They share the common manifest columns; the video list adds its one region's columns and the image list adds the `2D`/`1D` region columns (see the manifest above; `ItemType` is dropped). Rows of every status are kept (check `Status`; only `success` rows have view columns), and manifest records with no result yet are not in them. `AnonPatientID` / `AnonStudyID` are renamed to `PatientID` / `StudyID` here, since the final outputs hold no real IDs, and `OutputPath` is renamed to `FilePath` (relative to `files/`).
+- **`echo-study-list.csv`**: written by `merge`, one row per study in the video and image lists, with columns `PatientID` (the anonymized `AnonPatientID`), `StudyID` (the anonymized `AnonStudyID`) and `StudyDateTime` (the shifted StudyDate plus the StudyTime; date only if StudyTime is missing).
 
 ## Output naming
 
@@ -250,7 +257,7 @@ Both scripts can be killed at any point and rerun with the same command.
 **Script 1**
 - Each chunk is committed in this order:
   1. crosswalk rows are appended (then flushed and fsynced);
-  2. the manifest part is written atomically;
+  2. the video and image manifest parts are written atomically;
   3. the status part is written atomically. This is the commit marker.
 - Files already listed in a status part are skipped, including excluded and errored files, so they aren't rescanned.
 - A manifest part without its status part is deleted and its chunk is redone.
