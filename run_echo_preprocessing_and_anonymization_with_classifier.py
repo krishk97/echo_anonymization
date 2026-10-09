@@ -111,7 +111,7 @@ class AnonymizedEchoDataset(Dataset):
 
     @staticmethod
     def preprocess_echo_video(video: np.ndarray, bbox: tuple) -> np.ndarray:
-        """PLACEHOLDER -- burned-in PHI removal for one video region.
+        """Burned-in PHI removal for one video region.
 
         Crops to the region's bounding box, then zeroes stationary pixels (text, labels, ECG) by
         keeping only the moving ultrasound sector, and crops to it.
@@ -123,7 +123,7 @@ class AnonymizedEchoDataset(Dataset):
 
     @staticmethod
     def preprocess_echo_image(image: np.ndarray, bbox_2d: tuple | None, bbox_1d: tuple | None) -> np.ndarray:
-        """PLACEHOLDER -- burned-in PHI removal for a single-frame image.
+        """Burned-in PHI removal for a single-frame image.
 
         Keeps the full frame but zeroes everything outside the 2D and 1D (M-mode/Doppler) regions.
         Either box may be None; if both are, the whole image is zeroed.

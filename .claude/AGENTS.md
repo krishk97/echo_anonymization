@@ -122,12 +122,6 @@ add them to version control.
   - Images keep the full frame, with everything outside `BBox2D ∪ BBox1D` zeroed.
 - **Environment:** uv with `python-preference = "only-managed"`, Python 3.11, `.venv`. torch/torchvision come from the cu128 index; the dependencies include `tensorflow[and-cuda]`, `tf_keras` and `loguru`.
 
-## Placeholders the user will replace
-
-Keep these signatures stable:
-- `AnonymizedEchoDataset.preprocess_echo_video(video, bbox)`
-- `AnonymizedEchoDataset.preprocess_echo_image(image, bbox_2d, bbox_1d)`
-
 ## Code style
 
 - Write and review Python against the `python-style-guide` skill (`.claude/skills/python-style-guide/`, Google style). Load it before writing Python.
