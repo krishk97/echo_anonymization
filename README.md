@@ -21,7 +21,7 @@ Splitting the work this way lets you QA the anonymization before spending GPU ti
 
 ### Metadata anonymization
 
-Script 1 reads only the DICOM headers and keeps files whose SOP class is ultrasound (`index.sop_classes`). Everything that
+Script 1 (`create_anonymization_plan.py`) reads only the DICOM headers and keeps files whose SOP class is ultrasound (`index.sop_classes`). Everything that
 can identify a patient stays in the secure area (`paths.secure_dir`); only de-identified data reaches `paths.output_root`.
 
 - **Identifiers.** Each patient (`PatientID`) and study (`StudyInstanceUID`) gets a sequential ID (`P000000`, `S000000`), with
@@ -57,8 +57,8 @@ version of each file is ever written to disk.
 - **Videos** are cropped to the region box. Then every pixel that does not change across frames (text, labels, the ECG
   trace) is zeroed, keeping only the moving ultrasound sector, and the clip is cropped to that sector. The motion mask is
   adapted from [EchoPrime](https://github.com/echonet/EchoPrime/blob/main/video_utils.py) (`mask_outside_ultrasound_video`).
-- **Images** have no motion to use, so they keep the full frame with everything outside the 2D and 1D boxes zeroed. An
-  image with neither box is saved fully black.
+- **Images** have no motion to use, so instead we keep the full frame and mask everything outside region boxes that correspond to 
+2D, M-Mode, or Spectial spatial formats. An image with neither box is saved fully black.
 
 <!-- TODO: replace with an example of a masked video (e.g. a GIF of original vs. anonymized). -->
 ![Video masking example: original (left) and anonymized (right)](docs/figures/video_masking_example.gif)
@@ -153,6 +153,25 @@ uv run python run_echo_preprocessing_and_anonymization_with_classifier.py merge 
 - Don't run `run_echo_preprocessing_and_anonymization.py` and `run_echo_preprocessing_and_anonymization_with_classifier.py run` at the same time. They write to the same `results/rank=<r>/` directories.
 - `run_echo_preprocessing_and_anonymization.py` exits with code 1 if any process failed. Rerun it to resume.
 
+### On a Slurm cluster
+
+`slurm/` has example batch scripts that wrap the same commands. Submit them from the repo root:
+
+```bash
+slurm/submit_pipeline.sh                              # Script 1, then Script 2 (GPU) once Script 1 succeeds
+# or one stage at a time:
+sbatch slurm/01_create_anonymization_plan.sbatch [configs/config.yaml]
+sbatch slurm/02_run_with_classifier.sbatch       [configs/config.yaml] [--retry-errors]   # GPU run, then merge
+sbatch slurm/02_run_preprocess_only.sbatch       [configs/config.yaml] [--retry-errors]   # CPU only, then merge
+```
+
+- Before you submit, set the partition and account in the `#SBATCH` lines, and add a `module load` if `uv` isn't on the compute nodes' `PATH`.
+- The scripts can't read the config, so keep their resource requests in step with it by hand:
+  - `--gres=gpu:N` must be at least `preprocess.num_gpus`.
+  - `--cpus-per-task` should cover `index.num_workers` for Script 1, and `num_gpus` (or `num_cpu_procs`) × (`num_workers` + 1) for Script 2.
+- Job output goes to `slurm/logs/<job-name>_<job-id>.out`. Like the pipeline's own logs, it holds only counts and exception types.
+- Every stage resumes where it stopped, so if a job hits its time limit, resubmit it.
+
 ## Outputs
 
 ### Secure area (`paths.secure_dir`), contains PHI
@@ -236,4 +255,6 @@ src/dicom_utils.py                                           header reading, all
 src/image_utils.py                                           masking, resizing, AVI writing
 src/io_utils.py                                              config, atomic parquet writes, logging
 src/view_classifier/                                         EchoFine / EchoPrime loaders and inference
+scripts/                                                     shell wrappers for each stage
+slurm/                                                       example sbatch scripts for each stage, plus submit_pipeline.sh
 ```
