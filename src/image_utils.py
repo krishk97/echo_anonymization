@@ -1,20 +1,30 @@
-import os 
+"""Video writing, ultrasound-sector masking, and crop-and-resize helpers."""
+
+import os
+
+import cv2
 import numpy as np
 from PIL import Image
-import cv2
 
 
-def save_video_cv2(frames: np.ndarray, filepath: str, fps: float = 30.0, is_color: bool = True, codec: str = "MJPG") -> None:
+def save_video_cv2(
+    frames: np.ndarray,
+    filepath: str,
+    fps: float = 30.0,
+    is_color: bool = True,
+    codec: str = "MJPG",
+) -> None:
     """Saves a video array using OpenCV.
 
     Args:
-        frames (np.ndarray): Video frames with shape (N, H, W, C).
-        filepath (str): Output filepath. Should end with ".avi".
-        fps (float): Frames per second.
-        is_color (bool): Whether to write as color video.
-        codec (str): FourCC codec string (e.g., "MJPG", "XVID").
+        frames: Video frames with shape (N, H, W, C).
+        filepath: Output filepath. Should end with ".avi".
+        fps: Frames per second.
+        is_color: Whether to write as color video.
+        codec: FourCC codec string (e.g., "MJPG", "XVID").
 
     Raises:
+        TypeError: If `frames` is not a NumPy array.
         ValueError: If `frames` has invalid shape or values.
         RuntimeError: If the video writer cannot be opened.
     """
@@ -38,7 +48,8 @@ def save_video_cv2(frames: np.ndarray, filepath: str, fps: float = 30.0, is_colo
     if fps <= 0:
         raise ValueError("`fps` must be > 0.")
 
-    os.makedirs(os.path.dirname(filepath), exist_ok=True) if os.path.dirname(filepath) else None
+    if os.path.dirname(filepath):
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
     if frames.dtype != np.uint8:
         if np.issubdtype(frames.dtype, np.floating):
@@ -52,7 +63,9 @@ def save_video_cv2(frames: np.ndarray, filepath: str, fps: float = 30.0, is_colo
             frames = np.clip(frames, 0, 255).astype(np.uint8)
 
     fourcc = cv2.VideoWriter_fourcc(*codec)
-    writer = cv2.VideoWriter(filepath, fourcc, float(fps), (int(width), int(height)), bool(is_color))
+    writer = cv2.VideoWriter(
+        filepath, fourcc, float(fps), (int(width), int(height)), bool(is_color)
+    )
     if not writer.isOpened():
         raise RuntimeError(f"Failed to open video writer for: {filepath}")
 
@@ -68,56 +81,73 @@ def save_video_cv2(frames: np.ndarray, filepath: str, fps: float = 30.0, is_colo
         writer.release()
 
 
-def mask_outside_ultrasound_video(original_pixels: np.array, single_mask=False, crop_to_mask=False) -> np.array:
-    """
-    Masks all pixels outside the ultrasound region in a video.
-    Adapted from EchoPrime: https://github.com/echonet/EchoPrime/blob/main/video_utils.py
+def mask_outside_ultrasound_video(
+    original_pixels: np.ndarray, single_mask: bool = False, crop_to_mask: bool = False
+) -> np.ndarray:
+    """Masks all pixels outside the ultrasound region in a video.
+
+    Adapted from EchoPrime:
+    https://github.com/echonet/EchoPrime/blob/main/video_utils.py
+
     Args:
-        vid (np.ndarray): A numpy array representing the video frames in RGB format. FxHxWxC.
-        single_mask (bool): If True, create a single convex hull mask for the entire video.
-        crop_to_mask (bool): If True, crop the video to the bounding box of the mask.
+        original_pixels: Video frames in RGB format, shape (F, H, W, C). Not
+            modified.
+        single_mask: If True, mask with the convex hull of the largest
+            region found for the entire video.
+        crop_to_mask: If True, crop the video to the bounding box of the mask.
+
     Returns:
-        np.ndarray: A numpy array with pixels outside the ultrasound region masked.
+        A copy of the video with pixels outside the ultrasound region masked.
     """
     vid = np.copy(original_pixels)
     ##################### CREATE MASK #####################
     # Create gray scale verison of the video
-    vid_gray = np.stack([cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in vid], axis=0)
+    vid_gray = np.stack(
+        [cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) for frame in vid], axis=0
+    )
 
-    # Get mean and std of frames 
+    # Get mean and std of frames
     frame_mean = vid_gray.astype(np.float32).mean(axis=0)
     frame_std = vid_gray.astype(np.float32).std(axis=0)
 
-    # Erode std of video to get rid of small variations (e.g. EKG tracing, varying text like HR/FPS)
+    # Erode std of video to get rid of small variations (e.g. EKG tracing, varying
+    # text like HR/FPS)
     kernel = np.ones((3, 3), np.uint8)
     frame_std_eroded = cv2.erode(frame_std.astype(np.uint8), kernel, iterations=10)
 
-    # Make binary and get overlap of mean and std frames to find mask of ultrasound region.
+    # Make binary and get overlap of mean and std frames to find mask of ultrasound
+    # region.
     frame_mean = np.where(frame_mean > 0, 1, 0)
     frame_std_eroded = np.where(frame_std_eroded > 0, 1, 0)
     frame_overlap = np.add(frame_mean, frame_std_eroded)
     frame_overlap = np.where(frame_overlap > 1, 1, 0)
 
     # Dilate
-    kernel = np.ones((3,3), np.uint8)
-    frame_overlap = cv2.dilate(frame_overlap.astype(np.uint8), kernel, iterations=10).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    frame_overlap = cv2.dilate(
+        frame_overlap.astype(np.uint8), kernel, iterations=10
+    ).astype(np.uint8)
 
     # Fill everything that's outside the mask sector with some other number like 100
-    cv2.floodFill(frame_overlap, None, (0,0), 100)
+    cv2.floodFill(frame_overlap, None, (0, 0), 100)
     # make all non-100 values 255. The rest are 0
-    frame_overlap = np.where(frame_overlap!=100, 255, 0).astype(np.uint8)
-    contours, _ = cv2.findContours(frame_overlap, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    frame_overlap = np.where(frame_overlap != 100, 255, 0).astype(np.uint8)
+    contours, _ = cv2.findContours(
+        frame_overlap, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+    )
     # contours[0] has shape (445, 1, 2). 445 coordinates. each coord is 1 row, 2 numbers
-    if single_mask: 
+    if single_mask:
         frame_overlap = np.zeros_like(frame_overlap)
-        hull = cv2.convexHull(contours[0])
+        # Use the largest region: contour order from cv2 is not by size.
+        hull = cv2.convexHull(max(contours, key=cv2.contourArea))
         cv2.drawContours(frame_overlap, [hull], -1, (255, 0, 0), 3)
-    else: 
+    else:
         # Find the convex hull
         for i in range(len(contours)):
             hull = cv2.convexHull(contours[i])
             cv2.drawContours(frame_overlap, [hull], -1, (255, 0, 0), 3)
-    frame_overlap = np.where(frame_overlap > 0, 1, 0).astype(np.uint8) #make all non-0 values 1
+    # make all non-0 values 1
+    frame_overlap = np.where(frame_overlap > 0, 1, 0).astype(np.uint8)
     # Fill everything that's outside hull with some other number like 100
     cv2.floodFill(frame_overlap, None, (0, 0), 100)
     # make all non-100 values 255. The rest are 0
@@ -125,46 +155,59 @@ def mask_outside_ultrasound_video(original_pixels: np.array, single_mask=False, 
 
     # Store the dimension values
     # Apply the mask to every frame and channel (changing in place)
-    vid = np.stack([
-        cv2.bitwise_and(frame.astype(np.uint8),
-                        frame.astype(np.uint8),
-                        mask=frame_overlap.astype(np.uint8))
-        for frame in vid
-    ])
-    if crop_to_mask: 
-        vid = vid[:, 
-                  np.argwhere(frame_overlap).min(axis=0)[0]:np.argwhere(frame_overlap).max(axis=0)[0], 
-                  np.argwhere(frame_overlap).min(axis=0)[1]:np.argwhere(frame_overlap).max(axis=0)[1]]
+    vid = np.stack(
+        [
+            cv2.bitwise_and(
+                frame.astype(np.uint8),
+                frame.astype(np.uint8),
+                mask=frame_overlap.astype(np.uint8),
+            )
+            for frame in vid
+        ]
+    )
+    if crop_to_mask:
+        mask_min = np.argwhere(frame_overlap).min(axis=0)
+        mask_max = np.argwhere(frame_overlap).max(axis=0)
+        vid = vid[:, mask_min[0] : mask_max[0], mask_min[1] : mask_max[1]]
 
     return vid
 
 
-def crop_and_scale(img, res=(224, 224), zoom=0.1, interpolation=Image.Resampling.BICUBIC):
-    """
-    Crop and scale an image.
+def crop_and_scale(
+    img: np.ndarray,
+    res: tuple[int, int] = (224, 224),
+    zoom: float = 0.1,
+    interpolation: Image.Resampling = Image.Resampling.BICUBIC,
+) -> np.ndarray:
+    """Crops an image to the output aspect ratio, then resizes it.
+
     Source code: https://github.com/echonet/EchoPrime/blob/main/video_utils.py
+
     Args:
-        img (np.ndarray): Image to crop and scale. Shape: (H, W, C).
-        res (tuple): Resolution to scale to.
-        zoom (float): Zoom factor.
-        interpolation: Interpolation method.
+        img: Image to crop and scale. Shape: (H, W, C).
+        res: Output (height, width).
+        zoom: Fraction of the input size trimmed from each side after the
+            aspect-ratio crop; 0 disables it.
+        interpolation: PIL resampling filter.
+
     Returns:
-        np.ndarray: Cropped and scaled image.
+        The cropped and scaled image.
     """
     in_res = img.shape[:2]
     r_in = in_res[0] / in_res[1]
     r_out = res[0] / res[1]
 
-    if r_in > r_out: # if input aspect ratio is taller than output aspect ratio, crop height
+    # if input aspect ratio is taller than output aspect ratio, crop height
+    if r_in > r_out:
         padding = int(round((in_res[0] - r_out * in_res[1]) / 2))
-        img = img[padding:-padding]
+        img = img[padding : img.shape[0] - padding]
     if r_in < r_out:
         padding = int(round((in_res[1] - in_res[0] / r_out) / 2))
-        img = img[:, padding:-padding]
+        img = img[:, padding : img.shape[1] - padding]
     if zoom != 0:
         pad_x = round(int(in_res[1] * zoom))
         pad_y = round(int(in_res[0] * zoom))
-        img = img[pad_y:-pad_y, pad_x:-pad_x]
+        img = img[pad_y : img.shape[0] - pad_y, pad_x : img.shape[1] - pad_x]
 
     # img = cv2.resize(img, res, interpolation=interpolation)
     # Use PIL resize instead of cv2.resize to antialiasing issues

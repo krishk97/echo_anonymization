@@ -1,34 +1,100 @@
-import numpy as np
+"""EchoFine (Keras) view classifier: 47 views, run on full unmasked frames."""
 
+from pathlib import Path
+
+import numpy as np
 import tensorflow as tf
 import tf_keras
 
-ECHOFINE_VIEWS = {"0": "a2ch-full", "1": "a2ch-la", "2": "a2ch-lv", "3": "a3ch-full", "4": "a3ch-la", "5": "a3ch-lv", "6": "a3ch-outflow", 
-                  "7": "a4ch-full", "8": "a4ch-ias", "9": "a4ch-la", "10": "a4ch-lv", "11": "a4ch-ra", "12": "a4ch-rv", "13": "a5ch-full", 
-                  "14": "a5ch-outflow", "15": "apex", "16": "doppler-ao-descending", "17": "doppler-av", "18": "doppler-mv", "19": "doppler-pv", 
-                  "20": "doppler-tissue-lateral", "21": "doppler-tissue-rv", "22": "doppler-tissue-septal", "23": "doppler-tv", "24": "mmode-a4ch-rv", 
-                  "25": "mmode-ivc", "26": "mmode-plax-av", "27": "mmode-plax-lv", "28": "mmode-plax-mitral", "29": "plax-full-la", "30": "plax-full-lv", 
-                  "31": "plax-full-mv", "32": "plax-full-out", "33": "plax-full-rv-ao", "34": "plax-tv", "35": "plax-valves-av", "36": "plax-valves-mv", 
-                  "37": "psax-all", "38": "psax-av", "39": "psax-lv-apex", "40": "psax-lv-base", "41": "psax-lv-mid", "42": "psax-pv", "43": "psax-tv", 
-                  "44": "subcostal-heart", "45": "subcostal-ivc", "46": "suprasternal"}
+ECHOFINE_VIEWS = {
+    "0": "a2ch-full",
+    "1": "a2ch-la",
+    "2": "a2ch-lv",
+    "3": "a3ch-full",
+    "4": "a3ch-la",
+    "5": "a3ch-lv",
+    "6": "a3ch-outflow",
+    "7": "a4ch-full",
+    "8": "a4ch-ias",
+    "9": "a4ch-la",
+    "10": "a4ch-lv",
+    "11": "a4ch-ra",
+    "12": "a4ch-rv",
+    "13": "a5ch-full",
+    "14": "a5ch-outflow",
+    "15": "apex",
+    "16": "doppler-ao-descending",
+    "17": "doppler-av",
+    "18": "doppler-mv",
+    "19": "doppler-pv",
+    "20": "doppler-tissue-lateral",
+    "21": "doppler-tissue-rv",
+    "22": "doppler-tissue-septal",
+    "23": "doppler-tv",
+    "24": "mmode-a4ch-rv",
+    "25": "mmode-ivc",
+    "26": "mmode-plax-av",
+    "27": "mmode-plax-lv",
+    "28": "mmode-plax-mitral",
+    "29": "plax-full-la",
+    "30": "plax-full-lv",
+    "31": "plax-full-mv",
+    "32": "plax-full-out",
+    "33": "plax-full-rv-ao",
+    "34": "plax-tv",
+    "35": "plax-valves-av",
+    "36": "plax-valves-mv",
+    "37": "psax-all",
+    "38": "psax-av",
+    "39": "psax-lv-apex",
+    "40": "psax-lv-base",
+    "41": "psax-lv-mid",
+    "42": "psax-pv",
+    "43": "psax-tv",
+    "44": "subcostal-heart",
+    "45": "subcostal-ivc",
+    "46": "suprasternal",
+}
 
 
-def setup_echofine_view_classifier(weights, device_id: int):
-    """Initialize the Keras EchoForge view classifier on `device`."""
+def setup_echofine_view_classifier(
+    weights: str | Path, device_id: int
+) -> tf_keras.Model:
+    """Loads the Keras EchoFine view classifier onto a GPU.
+
+    Args:
+        weights: Path to the saved Keras model (`.h5`).
+        device_id: TF GPU index to load the model on.
+
+    Returns:
+        The loaded Keras model.
+    """
     with tf.device(f"GPU:{device_id}"):
         model = tf_keras.models.load_model(weights)
     return model
 
 
-def classify_view_echofine(echofine_model, video: np.ndarray, batch_size: int = 32) -> np.ndarray:
-    """Run EchoForge on `video` using this worker's Keras model."""
+def classify_view_echofine(
+    echofine_model: tf_keras.Model, video: np.ndarray, batch_size: int = 32
+) -> np.ndarray:
+    """Runs EchoFine on every frame of a video.
+
+    Args:
+        echofine_model: Model from `setup_echofine_view_classifier`.
+        video: Frames of shape (N, 224, 224, 3).
+        batch_size: Frames per forward pass.
+
+    Returns:
+        Per-frame view probabilities, shape (N, 47).
+    """
     B, H, W, C = video.shape
     assert (H, W) == (224, 224), f"Expected image resolution (224, 224), got {(H, W)}"
     assert C == 3, f"Expected num_channels=3, got {C}"
     extra_batch = 0 if B % batch_size == 0 else 1
     probits = []
     for k in range(B // batch_size + extra_batch):
-        image_batch = video[k * batch_size:min((k + 1) * batch_size, B)]
-        # Direct call instead of .predict(): no per-call progress bar or tf.data overhead
+        image_batch = video[k * batch_size : min((k + 1) * batch_size, B)]
+        # Direct call instead of .predict(): no per-call progress bar or tf.data
+        # overhead
         probits.append(np.asarray(echofine_model(image_batch, training=False)))
     return np.concatenate(probits, axis=0)

@@ -14,7 +14,7 @@ A two-stage pipeline that de-identifies a large (>1M file) echocardiogram DICOM 
 2. **`run_echo_preprocessing_and_anonymization_with_classifier.py`** (Script 2, GPU) has two subcommands:
    - `run` decodes each pending manifest record, crops and masks it, runs **EchoFine** (TF/Keras, 47 views) and **EchoPrime** (PyTorch, 11 views), saves PNG/AVI media under `output_root/files/`, and appends result parts. It spawns one process per GPU.
    - `merge` builds the final anonymized `echo-record-list.parquet` and `echo-study-list.csv` (`PatientID`, `StudyID`, `StudyDateTime`). In both, the anonymized `AnonPatientID`/`AnonStudyID` are renamed to `PatientID`/`StudyID`; in the record list `OutputPath` is also renamed to `FilePath`. For the study list it reads only the `AnonStudyID` and `StudyTime` columns of the crosswalk; `StudyDateTime` = shifted StudyDate + unshifted StudyTime.
-   - **Results cleanup (user decision, 2026-10-08):** `merge` `shutil.rmtree`s `output_root/results/` only when the merge is complete (every manifest record has a result, no `error` rows, no missing media). Otherwise it keeps `results/` so `run` can resume. After deletion, `pending_records` sees no results, so a later `run` redoes every manifest record, and a later `merge` rebuilds the final tables from only the new results.
+   - **Results cleanup (user decision, 2026-10-08):** `merge` `shutil.rmtree`s `output_root/results/` only when the merge is complete (every manifest record has a result from the current `pipeline_version`, no `error` rows, no missing media). Otherwise it keeps `results/` so `run` can resume. After deletion, `pending_records` sees no results, so a later `run` redoes every manifest record, and a later `merge` rebuilds the final tables from only the new results.
 
 3. **`run_echo_preprocessing_and_anonymization.py`** (CPU) is Script 2's `run` without the view classifiers, for when no GPU is available. It reuses `pending_records(..., classify=False)`, `shard_files` and `run_rank(..., models=None)`, and spawns `preprocess.num_cpu_procs` processes. It saves the same media, and its result rows get status `preprocessed` with no view columns. The final table is still built with `run_echo_preprocessing_and_anonymization_with_classifier.py merge`.
 
@@ -23,7 +23,7 @@ All settings live in `configs/config.yaml`, which both scripts share. The user i
 ## Hard rules
 
 - **Never open, print or log real DICOM headers or pixel data on this server.** Develop and test only against `tests/synthetic.py` fixtures or pydicom test data. Do not run either script against real paths.
-- **Logs and status rows record the exception *type* only**, never messages, tag values or file paths. pydicom's logger and warnings are silenced via `quiet_pydicom()` for the same reason.
+- **Logs and status rows record the exception *type* only**, never messages, tag values or file paths. pydicom's logger and warnings are silenced via `quiet_pydicom()` for the same reason, in every process that reads DICOMs: Script 1's pool (forked, inherits it), each rank process, and each spawned DataLoader worker (`worker_init_fn=_init_worker`, because a spawned process doesn't inherit the disabled logger).
 - **The crosswalk is append-only.** Existing IDs must never change, and counters resume from the highest existing ID.
   - IDs are sequential, with no hashing and no secret key: `P000000` per `PatientID`, `S000000` per `StudyInstanceUID`.
   - Only Script 1's main process writes the crosswalk. Workers just return the keys they read.
@@ -55,16 +55,18 @@ slurm/                                                       sbatch examples (in
                                                              (GPU run + merge), 02_run_preprocess_only (CPU + merge), submit_pipeline.sh
                                                              (chains 01 -> 02 GPU via afterok). Submit from repo root (cd $SLURM_SUBMIT_DIR);
                                                              stdout goes to slurm/logs/. --gres/--cpus-per-task must match config.yaml by hand.
+tests/conftest.py                                            fixtures dicom_tree (synthetic tree under tmp_path), make_cfg (config pointing at tmp dirs)
+tests/synthetic.py                                           fake DICOM generator: build_tree(root), FAKE_PHI strings for leak tests
+tests/test_index.py                                          Script 1
+tests/test_preprocess.py, tests/test_merge.py                Script 2 run_rank/pending_records and merge, with stub models (no TF/torch weights)
+tests/test_image_utils.py                                    masking (largest contour) and crop_and_scale
 ```
 
 ### Internal-only (local, not part of the repo)
 
-The user keeps these on disk for their own use, and they are deliberately **not** part of the published repo.
-They are gitignored or deleted. **Don't mention them in `README.md`** or any other user-facing docs, and don't
-add them to version control.
+The user keeps this on disk for their own use, and it is deliberately **not** part of the published repo.
+**Don't mention it in `README.md`** or any other user-facing docs, and don't add it to version control.
 
-- `tests/`: `conftest.py` (fixtures `dicom_tree`, `make_cfg`), `synthetic.py` (fake DICOM generator) and
-  `test_index.py` (Script 1), `test_preprocess.py` / `test_merge.py` (Script 2, stub models). It's gitignored.
 - `example_old_code/`: the user's earlier `anonymize_echos.py` / `preprocess_echos.py`, which this pipeline
   iterates on. It has been removed from the working tree and may come back locally.
 
@@ -81,13 +83,13 @@ add them to version control.
   - done = the source paths in all status parts;
   - the naming registry = the stems of all manifest `RecordID`s.
 - Part numbers form one global sequence across runs. Don't put timestamps in part names: a same-second restart once overwrote a committed chunk.
-- Status values: `included`, `excluded_sop_class` (detail = SOP name), `excluded_no_pixel_data`, `excluded_missing_patient_id`, `excluded_missing_study_uid`, `excluded_too_many_frames` (NumberOfFrames > `index.max_num_frames`; `null` = no limit; checked in `extract_header`), `excluded_no_video_region`, `error` (detail = exception type).
+- Status values: `included`, `excluded_sop_class` (detail = SOP name), `excluded_no_pixel_data`, `excluded_missing_patient_id`, `excluded_missing_study_uid`, `excluded_too_many_frames` (NumberOfFrames > `index.max_num_frames`; `null` = no limit; checked in `extract_header`), `excluded_no_video_region`, `excluded_no_image_region`, `error` (detail = exception type).
 
 **Script 2**
-- Done = every `RecordID` in `output_root/results/rank=*/part-*.parquet`, whatever its status. With `--retry-errors`, items whose latest row is `error` are re-queued. Items whose latest row is `preprocessed` are pending for `run_echo_preprocessing_and_anonymization_with_classifier.py run` (`classify=True`, the default) but done for `run_echo_preprocessing_and_anonymization.py` (`classify=False`).
+- Done = every `RecordID` whose latest row in `output_root/results/rank=*/part-*.parquet` has the config's `preprocess.pipeline_version`, whatever its status. A different version means pending (user decision, 2026-10-08), so bumping the version reprocesses everything; `merge` counts such rows as incomplete (QA line "records from another pipeline_version") and keeps `results/`. With `--retry-errors`, items whose latest row is `error` are re-queued. Items whose latest row is `preprocessed` are pending for `run_echo_preprocessing_and_anonymization_with_classifier.py run` (`classify=True`, the default) but done for `run_echo_preprocessing_and_anonymization.py` (`classify=False`).
 - Pending records are grouped **by source file** and sorted by `DecodedBytes` (largest first), then dealt round-robin to the ranks.
 - The parent sets `CUDA_VISIBLE_DEVICES` before each `spawn` and maps rank r to the r-th GPU already visible to the job. TF is imported only inside `load_models` and enables memory growth.
-- DataLoader: `batch_size=None`, identity collate, `multiprocessing_context="spawn"`, `in_order=False`, `persistent_workers=True`.
+- DataLoader: `batch_size=None`, identity collate, `multiprocessing_context="spawn"`, `in_order=False`, `persistent_workers=True`, `worker_init_fn=_init_worker` (calls `quiet_pydicom()`).
 - A result row is added only after both models have run **and** the media file has been saved atomically. The temp name keeps the extension (`x.tmp.avi`) because cv2/PIL choose the format from it.
 - Result statuses: `success`, `preprocessed` (run_echo_preprocessing_and_anonymization.py only), `skipped_oversize`, `skipped_undecodable`, `error`. With `models=None`, `run_rank` skips both models and writes `preprocessed` once the media is saved. The `merge` QA check for missing media covers `success` and `preprocessed`.
 - `run_echo_preprocessing_and_anonymization.py` and the GPU `run` share `results/rank=<r>/`. Running them at the same time could clash on part numbers.
@@ -103,14 +105,14 @@ add them to version control.
   - A later clash in the same study gets `_s<SeriesNumber>`, or `_sna` if SeriesNumber is missing; a further clash adds `-2`, `-3`, ….
   - A missing InstanceNumber gives `na<k>` (next free k).
   - The registry stores stems, i.e. the RecordID without `_r<i>`.
-- **Video regions:** keep regions with RegionSpatialFormat = 2D and RegionDataType ∈ {unknown/0, Tissue, Color Flow}.
+- **Video regions:** keep regions with RegionSpatialFormat = 2D and RegionDataType ∈ {unknown/0, Tissue, Color Flow} (`TWO_D_DATA_TYPES`).
   - Drop a region whose box lies fully inside another kept region.
   - No region sequence → one full-frame record (`RegionSource="full_frame"`).
   - No qualifying region → `excluded_no_video_region`.
 - **Images:** one record each.
-  - `BBox2D*` = the largest 2D region; `BBox1D*` = the largest M-mode/Spectral region. Either may be null.
+  - `BBox2D*` = the largest 2D region with a `TWO_D_DATA_TYPES` data type (same rule as videos); `BBox1D*` = the largest M-mode/Spectral region. One of them may be null.
   - All regions go into `RegionsJSON`.
-  - No region sequence → `BBox2D*` is the full frame.
+  - **No region sequence, or neither box → `excluded_no_image_region`** (user decision, 2026-10-08), so an image is never saved without a box saying what to keep. There is no full-frame fallback for images (videos still have one, because they get the motion mask).
 - **Boxes are half-open** `(x0, y0, x1, y1)`, ready for numpy slicing. DICOM's MaxX1/MaxY1 are inclusive, so 1 is added.
 - **Missing PatientID or StudyInstanceUID** → the file is excluded with a status. It is never grouped with other files.
 - **Media folder** is `output_root/files/` (renamed from `file/` on 2026-10-08). Media written earlier must be moved by hand.
@@ -120,14 +122,17 @@ add them to version control.
   - EchoPrime gets the record's masked media, resized to 224.
 - **View-classification columns (user decision, 2026-10-08):** `summarize()` stores one score per view, `score = mean / (1 + std)` of the per-frame probabilities, as `EchoFine_View=<view>` / `EchoPrime_View=<view>`, plus `View_<Model>` (argmax of the score) and `ViewScore_<Model>`. Raw mean/std are not saved. `merge` picks these columns up via `MODEL_COL_PREFIXES`. Results written earlier used `echofine_<view>`, `_std` and `echofine_view`.
 - **Only the masked media is written to disk**, at native (cropped) resolution:
-  - Videos are cropped to the region box, then `mask_outside_ultrasound_video(single_mask=True, crop_to_mask=True)`.
+  - Videos are cropped to the region box, then `mask_outside_ultrasound_video(single_mask=True, crop_to_mask=True)`. The single mask is the convex hull of the **largest** contour (user decision, 2026-10-08; it used to be `contours[0]`, whose order is arbitrary). The hole-filling `floodFill` from pixel (0, 0) still assumes that corner is background.
   - Images keep the full frame, with everything outside `BBox2D ∪ BBox1D` zeroed.
 - **Environment:** uv with `python-preference = "only-managed"`, Python 3.11, `.venv`. torch/torchvision come from the cu128 index; the dependencies include `tensorflow[and-cuda]`, `tf_keras` and `loguru`.
 
 ## Code style
 
 - Write and review Python against the `python-style-guide` skill (`.claude/skills/python-style-guide/`, Google style). Load it before writing Python.
-- Apply it to new and changed code only. The existing code was written before the guide, and much of it doesn't follow it: about 250 lines are over 88 characters, most functions have one-line docstrings or none instead of Google-style `Args:`/`Returns:`, and it imports names from app modules (`from src.io_utils import load_config, ...`). Don't reformat or re-docstring untouched code unless the user asks.
+- The whole repo, `tests/` included, follows the guide (user decision, 2026-10-08): ruff-formatted at 88 columns, full type annotations, and Google-style docstrings (`Args:`/`Returns:`/`Raises:`) on every module, class and function, including test functions and fixtures. Keep it that way. The gate is `uv run ruff format --check . && uv run ruff check .`, and it must be clean.
+- Ruff config lives in `pyproject.toml`: rules `E, W, F, I, B, UP, D (google), ANN`. `ANN401` is ignored (`Any` is fine for raw DICOM values and config dicts). `D104` is ignored for the empty `__init__.py` files. `known-first-party` lists `src`, `synthetic` and `test_preprocess`.
+  - `*.md` is excluded from ruff, because ruff 0.16 also formats Python code blocks in Markdown. Running it on `.claude/skills/python-style-guide/` once "fixed" the guide's deliberate bad examples.
+  - Long log or error strings are split with implicit concatenation, so the message text stays the same.
 - **Logging uses Loguru** (user decision, 2026-10-08), as the guide says: `from loguru import logger`, brace-style lazy args (`logger.info("{} files", n)`), no `logging.getLogger`. `setup_logging()` in `src/io_utils.py` calls `logger.remove()`, then adds a stderr sink and a `<log_dir>/<name>_<timestamp>.log` sink. Each spawned rank process calls it again. The `{name}` field is the module name, so Script 1 logs as `__main__`. Exceptions to note:
   - Log the exception type only (see Hard rules), never `{e}` as the guide's examples do.
   - `quiet_pydicom()` still uses stdlib `logging`, because pydicom logs through it. Other third-party stdlib loggers (TF, torch) are no longer routed into the log files; they fall back to stdlib's default stderr handler (WARNING and above).
@@ -136,11 +141,11 @@ add them to version control.
 
 ## Working in this repo
 
-- Run everything through uv: `uv run pytest`, `uv run python create_anonymization_plan.py --config ...`. A warning about an active conda `VIRTUAL_ENV` being ignored is harmless.
-- Use the scratchpad for synthetic end-to-end runs (internal tooling only, see above). `tests/synthetic.py: build_tree(root)` writes a standard fake dataset. It includes multi-region clips, overlapping InstanceNumbers, a missing InstanceNumber, non-US, no-pixel and missing-key files, a corrupt file, and fake "PHI" strings (`synthetic.FAKE_PHI`) for leak tests.
+- Run everything through uv: `uv run pytest`, `uv run ruff check .`, `uv run python create_anonymization_plan.py --config ...`. A warning about an active conda `VIRTUAL_ENV` being ignored is harmless.
+- Use the scratchpad for synthetic end-to-end runs. `tests/synthetic.py: build_tree(root)` writes a standard fake dataset. It includes multi-region clips, overlapping InstanceNumbers, a missing InstanceNumber, images without a region sequence or with only unusable regions (`x_img_*`, in study B1 so the crosswalk still has 3 studies), non-US, no-pixel and missing-key files, a corrupt file, and fake "PHI" strings (`synthetic.FAKE_PHI`) for leak tests.
 - Script 2 can be exercised on CPU by calling `pending_records` → `shard_files` → `run_rank(rank, files, cfg, models)` with a stub `Models(echofine, echoprime, views, views)`. Raise a `BaseException` subclass to simulate a crash, since `Exception` is caught per record.
 - This development node has **no GPU driver**. Real model loading and inference have never been run.
-- `.gitignore` ignores `tests/`, `.claude/` and `.vscode/`. Those directories won't be committed.
+- `tests/` and `.claude/` are tracked in git (since 2026-10-08; README has a short "Tests" section). `.gitignore` still ignores `.vscode/`.
 
 ## Current state and known issues (as of 2026-10-08)
 
@@ -148,8 +153,7 @@ add them to version control.
 - `run_echo_preprocessing_and_anonymization.py` was verified end-to-end on synthetic data (CPU): its rows are `preprocessed`; a rerun says "Nothing to process"; a later stub-model `run_rank` turns them into `success`. It has no test in `tests/` yet.
 - **Column naming convention (user decision, 2026-10-08):** every column in every table (crosswalk, manifest, status, results, final outputs) is DICOM-style CamelCase, renamed at the source rather than at merge. Acronyms stay upper-case (`FPS`, `SOPClass`, `RegionsJSON`, `BBox2DX0`); suffixes are joined (`StudyDateShifted`, `PatientAgeCapped`). The view columns (`EchoFine_View=<view>`, `View_<Model>`, `ViewScore_<Model>`) keep their underscores by choice. The final outputs rename `AnonPatientID`/`AnonStudyID` → `PatientID`/`StudyID`, and `echo-record-list` renames `OutputPath` → `FilePath`. Only column names changed: Python dict keys inside `extract_header`, status/enum *values* (`excluded_sop_class`, `success`, …) and the keys inside `RegionsJSON` stay snake_case. Older names (snake_case `output_path`, `item_type`, `bbox_2d_x0`, `status`, `StudyDate_shifted`, …; before that `anon_patient`, `item_id`, …) are in outputs written before then. An old crosswalk fails the header check on load, and old manifest/status/result parts would raise a KeyError, so rerun both scripts.
 - **Crosswalk rename (2026-10-08):** the crosswalk file is now `secure_dir/anonymization_crosswalk.csv` (was `crosswalk.csv`), and the module is `src/anon_crosswalk.py` (was `src/crosswalk.py`; class `Crosswalk` → `AnonCrosswalk`, `CROSSWALK_COLUMNS` → `ANON_CROSSWALK_COLUMNS`). Script 1 does not look for the old filename. A secure_dir from before the rename must have its `crosswalk.csv` renamed by hand, or Script 1 starts a new crosswalk at `P000000`/`S000000`.
-- Internal `tests/test_index.py` covers Script 1: SOP filter, region records, collision naming, crosswalk restart and reuse, truncated-line recovery, crash/restart, and no PHI in the manifest. `tests/test_preprocess.py` and `tests/test_merge.py` cover Script 2 and `merge` with stub models; `test_merge.py` also checks that `StudyDateTime` and `AcquisitionDateTimeShifted` use the crosswalk `DateOffsetDays`, and covers deleting or keeping `results/`. `tests/synthetic.py` sets `AcquisitionDateTime` = StudyDate + `101730.250000`.
-- `pyproject.toml` still has a `pytest` dev dependency group and `[tool.pytest.ini_options] testpaths = ["tests"]` for the internal tests.
-- **Unfixed bug in `src/image_utils.py: crop_and_scale`:** when the aspect-ratio padding rounds to 0 (e.g. a 225×224 frame), `img[0:-0]` is empty and the function silently returns an all-black 224×224 image. The fix is to slice `img[p:img.shape[0]-p]` and do the same for width and zoom. It was reported to the user, who hasn't asked for it to be fixed yet.
-- An image whose regions are all non-2D/1D (e.g. ECG only) gets null boxes and is saved fully black. That errs on the side of PHI safety, but the record is useless.
+- `tests/test_index.py` covers Script 1: SOP filter, region records, collision naming, crosswalk restart and reuse, truncated-line recovery, crash/restart, and no PHI in the manifest. `tests/test_preprocess.py` and `tests/test_merge.py` cover Script 2 and `merge` with stub models; `test_merge.py` also checks that `StudyDateTime` and `AcquisitionDateTimeShifted` use the crosswalk `DateOffsetDays`, and covers deleting or keeping `results/`. `tests/synthetic.py` sets `AcquisitionDateTime` = StudyDate + `101730.250000`.
+- `pyproject.toml` has a dev dependency group (`pytest`, `ruff`) and `[tool.pytest.ini_options] testpaths = ["tests"]`.
+- **Fixed (2026-10-08):** `crop_and_scale` used `img[p:-p]`, which is empty when the padding rounds to 0 (e.g. a 225×224 frame) and gave an all-black model input. It now slices to `shape - p`. `tests/test_image_utils.py` covers this and the largest-contour mask.
 - VS Code may flag `tf_keras` as unresolved when it uses the conda interpreter; `.venv/bin/python` is the right one.

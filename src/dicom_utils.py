@@ -1,22 +1,28 @@
 """DICOM utilities shared by both scripts.
 
-Header side (Script 1, runs in worker processes): header-only reading, SOP class filtering, allowlisted
-metadata extraction, date shifting / age capping, and ultrasound region detection and selection.
-Workers only read headers and return what they find; they never assign IDs or write files.
-Errors are reported as the exception *type* only -- tag values and exception messages can hold PHI.
+Header side (Script 1, runs in worker processes): header-only reading, SOP class
+filtering, allowlisted metadata extraction, date shifting / age capping, and
+ultrasound region detection and selection. Workers only read headers and return
+what they find; they never assign IDs or write files. Errors are reported as the
+exception *type* only -- tag values and exception messages can hold PHI.
 
-Pixel side (Script 2): `decode_frames` decodes a file once, frame by frame, into display-ready RGB.
+Pixel side (Script 2): `decode_frames` decodes a file once, frame by frame, into
+display-ready RGB.
 
-Regions: `find_us_regions` takes a header-only pydicom Dataset and returns a list of `Region`. Everything
-downstream (record creation in Script 1, cropping/masking in Script 2) only uses the `Region` fields.
-Bounding boxes are half-open pixel ranges for direct numpy slicing: rows [y0, y1), cols [x0, x1).
-(DICOM's RegionLocationMaxX1/MaxY1 are inclusive, so `find_us_regions` adds 1.)
+Regions: `find_us_regions` takes a header-only pydicom Dataset and returns a list of
+`Region`. Everything downstream (record creation in Script 1, cropping/masking in
+Script 2) only uses the `Region` fields. Bounding boxes are half-open pixel ranges
+for direct numpy slicing: rows [y0, y1), cols [x0, x1). (DICOM's
+RegionLocationMaxX1/MaxY1 are inclusive, so `find_us_regions` adds 1.)
 """
+
 import datetime as dt
 import json
 import logging
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pydicom
@@ -28,6 +34,23 @@ from pydicom.uid import UID_dictionary
 
 from src.anon_crosswalk import PATIENT_FIELDS, STUDY_FIELDS
 
+# --------------------------------------------------------------------------------------
+# Ultrasound regions
+# --------------------------------------------------------------------------------------
+# RegionSpatialFormat (0018,6012)
+SPATIAL_2D = 1
+SPATIAL_MMODE = 2
+SPATIAL_SPECTRAL = 3
+SPATIAL_FORMAT_NAMES = {
+    0: "None",
+    1: "2D",
+    2: "M-Mode",
+    3: "Spectral",
+    4: "Wave form",
+    5: "Graphics",
+}
+
+# RegionDataType (0018,6014)
 REGION_DATA_TYPE_DICT = {
     0: None,
     1: "Tissue",
@@ -49,75 +72,120 @@ REGION_DATA_TYPE_DICT = {
     18: "Other Physiological (Amplitude vs. Time) input",
 }
 
-
-# ---------------------------------------------------------------------------------------------------
-# Ultrasound regions
-# ---------------------------------------------------------------------------------------------------
-# RegionSpatialFormat (0018,6012)
-SPATIAL_2D = 1
-SPATIAL_MMODE = 2
-SPATIAL_SPECTRAL = 3
-SPATIAL_FORMAT_NAMES = {0: "None", 1: "2D", 2: "M-Mode", 3: "Spectral", 4: "Wave form", 5: "Graphics"}
-
-# RegionDataType (0018,6014) values kept for video records: unknown/0, Tissue, Color Flow
-VIDEO_DATA_TYPES = {None, 0, 1, 2}
+# Data types of a usable 2D region (video records and the 2D box of images):
+# unknown/0, Tissue, Color Flow
+TWO_D_DATA_TYPES = {None, 0, 1, 2}
 ONE_D_SPATIAL_FORMATS = {SPATIAL_MMODE, SPATIAL_SPECTRAL}
 
 # Non-identifying per-region attributes copied into `Region.details`
-REGION_DETAIL_TAGS = ["PhysicalUnitsXDirection", "PhysicalUnitsYDirection", "PhysicalDeltaX", "PhysicalDeltaY",
-                      "ReferencePixelX0", "ReferencePixelY0", "TransducerFrequency", "PulseRepetitionFrequency"]
+REGION_DETAIL_TAGS = [
+    "PhysicalUnitsXDirection",
+    "PhysicalUnitsYDirection",
+    "PhysicalDeltaX",
+    "PhysicalDeltaY",
+    "ReferencePixelX0",
+    "ReferencePixelY0",
+    "TransducerFrequency",
+    "PulseRepetitionFrequency",
+]
 
 
 @dataclass
 class Region:
-    index: int  # position in SequenceOfUltrasoundRegions (or 0 for a synthetic full-frame region)
+    """One ultrasound region, with a half-open pixel box.
+
+    Attributes:
+        index: Position in SequenceOfUltrasoundRegions (or 0 for a synthetic
+            full-frame region).
+        x0: First column of the box.
+        y0: First row of the box.
+        x1: One past the last column of the box.
+        y1: One past the last row of the box.
+        spatial_format: RegionSpatialFormat, or None if missing.
+        data_type: RegionDataType, or None if missing.
+        details: Non-identifying attributes from `REGION_DETAIL_TAGS`.
+    """
+
+    index: int
     x0: int
     y0: int
     x1: int
     y1: int
     spatial_format: int | None = None
     data_type: int | None = None
-    details: dict = field(default_factory=dict)
+    details: dict[str, int | float | None] = field(default_factory=dict)
 
     @property
     def area(self) -> int:
+        """Box area in pixels (0 for an empty box)."""
         return max(0, self.x1 - self.x0) * max(0, self.y1 - self.y0)
 
     def contains(self, other: "Region") -> bool:
-        return self.x0 <= other.x0 and self.y0 <= other.y0 and self.x1 >= other.x1 and self.y1 >= other.y1
+        """Returns True if `other`'s box lies fully inside this region's box."""
+        return (
+            self.x0 <= other.x0
+            and self.y0 <= other.y0
+            and self.x1 >= other.x1
+            and self.y1 >= other.y1
+        )
 
-    def to_dict(self) -> dict:
-        return {"index": self.index, "x0": self.x0, "y0": self.y0, "x1": self.x1, "y1": self.y1,
-                "spatial_format": self.spatial_format, "data_type": self.data_type, **self.details}
+    def to_dict(self) -> dict[str, Any]:
+        """Returns the region as a flat dict, with `details` merged in."""
+        return {
+            "index": self.index,
+            "x0": self.x0,
+            "y0": self.y0,
+            "x1": self.x1,
+            "y1": self.y1,
+            "spatial_format": self.spatial_format,
+            "data_type": self.data_type,
+            **self.details,
+        }
 
 
-def _int_or_none(value):
+def _int_or_none(value: Any) -> int | None:
+    """Converts a value to int, or None if missing or unconvertible."""
     try:
         return None if value is None else int(value)
     except (TypeError, ValueError):
         return None
 
 
-def _primitive(value):
+def _primitive(value: Any) -> int | float | None:
+    """Converts a value to float (if a float) or int, or None if unconvertible."""
     try:
         return float(value) if isinstance(value, float) else int(value)
     except (TypeError, ValueError):
         return None
 
 
-def find_us_regions(ds) -> list[Region]:
-    """Return the ultrasound regions of a header-only dataset.
+def find_us_regions(ds: pydicom.Dataset) -> list[Region]:
+    """Returns the ultrasound regions of a header-only dataset.
 
     One Region per item of SequenceOfUltrasoundRegions (0018,6011), using
-    RegionLocationMinX0/MinY0/MaxX1/MaxY1, RegionSpatialFormat and RegionDataType. Boxes are clipped
-    to the image size; items with a missing or empty box are skipped. Returns [] when the sequence is
-    absent (callers then fall back to the full frame).
+    RegionLocationMinX0/MinY0/MaxX1/MaxY1, RegionSpatialFormat and RegionDataType.
+    Boxes are clipped to the image size; items with a missing or empty box are
+    skipped.
+
+    Args:
+        ds: A header-only pydicom dataset.
+
+    Returns:
+        The regions in sequence order, or [] when the sequence is absent (callers
+        then fall back to the full frame).
     """
     rows, cols = _int_or_none(ds.get("Rows")), _int_or_none(ds.get("Columns"))
     regions = []
     for i, item in enumerate(ds.get("SequenceOfUltrasoundRegions") or []):
-        box = [_int_or_none(item.get(k)) for k in
-               ("RegionLocationMinX0", "RegionLocationMinY0", "RegionLocationMaxX1", "RegionLocationMaxY1")]
+        box = [
+            _int_or_none(item.get(k))
+            for k in (
+                "RegionLocationMinX0",
+                "RegionLocationMinY0",
+                "RegionLocationMaxX1",
+                "RegionLocationMaxY1",
+            )
+        ]
         if None in box:
             continue
         x0, y0, x1, y1 = box[0], box[1], box[2] + 1, box[3] + 1
@@ -127,54 +195,118 @@ def find_us_regions(ds) -> list[Region]:
             y0, y1 = max(0, min(y0, rows)), max(0, min(y1, rows))
         if x1 <= x0 or y1 <= y0:
             continue
-        details = {k: _primitive(item.get(k)) for k in REGION_DETAIL_TAGS if item.get(k) is not None}
-        regions.append(Region(i, x0, y0, x1, y1,
-                              _int_or_none(item.get("RegionSpatialFormat")),
-                              _int_or_none(item.get("RegionDataType")), details))
+        details = {
+            k: _primitive(item.get(k))
+            for k in REGION_DETAIL_TAGS
+            if item.get(k) is not None
+        }
+        regions.append(
+            Region(
+                i,
+                x0,
+                y0,
+                x1,
+                y1,
+                _int_or_none(item.get("RegionSpatialFormat")),
+                _int_or_none(item.get("RegionDataType")),
+                details,
+            )
+        )
     return regions
 
 
 def full_frame_region(rows: int, cols: int) -> Region:
+    """Returns a synthetic region (index 0) covering the whole `rows` x `cols` frame."""
     return Region(0, 0, 0, cols, rows)
 
 
 def select_video_regions(regions: list[Region]) -> list[Region]:
-    """Regions that become one video record each: 2D spatial format with Tissue/Color Flow/unknown
-    data type, minus any region whose box lies fully inside another kept region (e.g. a color box
-    inside the 2D sector). For identical boxes the lower index is kept."""
-    kept = [r for r in regions if r.spatial_format == SPATIAL_2D and r.data_type in VIDEO_DATA_TYPES]
-    return [r for r in kept
-            if not any(o is not r and o.contains(r) and (not r.contains(o) or o.index < r.index) for o in kept)]
+    """Selects the regions that become one video record each.
+
+    Keeps 2D regions with a Tissue/Color Flow/unknown data type, minus any region
+    whose box lies fully inside another kept region (e.g. a color box inside the 2D
+    sector). For identical boxes the lower index is kept.
+
+    Args:
+        regions: All regions of the file, from `find_us_regions`.
+
+    Returns:
+        The selected regions, in input order.
+    """
+    kept = [
+        r
+        for r in regions
+        if r.spatial_format == SPATIAL_2D and r.data_type in TWO_D_DATA_TYPES
+    ]
+    return [
+        r
+        for r in kept
+        if not any(
+            o is not r and o.contains(r) and (not r.contains(o) or o.index < r.index)
+            for o in kept
+        )
+    ]
 
 
 def select_image_regions(regions: list[Region]) -> tuple[Region | None, Region | None]:
-    """(2D region, 1D region) for a single-frame image: the largest 2D region and the largest
-    M-mode/Spectral region. Either may be None."""
-    two_d = [r for r in regions if r.spatial_format == SPATIAL_2D]
+    """Selects the 2D and 1D regions of a single-frame image.
+
+    Args:
+        regions: All regions of the file, from `find_us_regions`.
+
+    Returns:
+        (largest 2D Tissue/Color Flow/unknown region, largest M-mode/Spectral
+        region). Ties go to the lower index. Either may be None.
+    """
+
+    def largest(rs: list[Region]) -> Region | None:
+        return max(rs, key=lambda r: (r.area, -r.index)) if rs else None
+
+    two_d = [
+        r
+        for r in regions
+        if r.spatial_format == SPATIAL_2D and r.data_type in TWO_D_DATA_TYPES
+    ]
     one_d = [r for r in regions if r.spatial_format in ONE_D_SPATIAL_FORMATS]
-    largest = lambda rs: max(rs, key=lambda r: (r.area, -r.index)) if rs else None
     return largest(two_d), largest(one_d)
 
 
-# ---------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # Header extraction (Script 1)
-# ---------------------------------------------------------------------------------------------------
-PIXEL_DATA_TAGS = {0x7FE00008, 0x7FE00009, 0x7FE00010}  # Float/DoubleFloat/PixelData, as stop_before_pixels
+# --------------------------------------------------------------------------------------
+# Float/DoubleFloat/PixelData, as stop_before_pixels
+PIXEL_DATA_TAGS = {
+    0x7FE00008,
+    0x7FE00009,
+    0x7FE00010,
+}
 
 
 def quiet_pydicom() -> None:
-    """Silence pydicom's log messages and warnings: they can contain file paths and tag values (PHI).
-    Call in every process that reads DICOMs (forked workers inherit it)."""
+    """Silences pydicom's log messages and all warnings.
+
+    They can contain file paths and tag values (PHI). Call in every process that
+    reads DICOMs (forked workers inherit it).
+    """
     logging.getLogger("pydicom").disabled = True
     warnings.filterwarnings("ignore")
 
 
-def read_header(path) -> tuple[pydicom.Dataset, bool]:
-    """Read a DICOM header without pixel data. Same as dcmread(stop_before_pixels=True), but also
-    reports whether a pixel data element exists (without reading it)."""
+def read_header(path: str | Path) -> tuple[pydicom.Dataset, bool]:
+    """Reads a DICOM header without pixel data.
+
+    Same as `dcmread(stop_before_pixels=True)`, but also reports whether a pixel
+    data element exists (without reading it).
+
+    Args:
+        path: DICOM file path.
+
+    Returns:
+        (header dataset, whether the file has a pixel data element).
+    """
     seen = {"pixels": False}
 
-    def stop_at_pixels(tag, vr, length) -> bool:
+    def stop_at_pixels(tag: int, vr: str | None, length: int) -> bool:
         if tag in PIXEL_DATA_TAGS:
             seen["pixels"] = True
             return True
@@ -185,16 +317,25 @@ def read_header(path) -> tuple[pydicom.Dataset, bool]:
     return ds, seen["pixels"]
 
 
-def sop_class_name(ds) -> str:
+def sop_class_name(ds: pydicom.Dataset) -> str:
+    """Returns the SOP class name, or "Missing SOPClassUID" / "Unknown SOP Class"."""
     uid = ds.get("SOPClassUID")
     if not uid:
         return "Missing SOPClassUID"
     return UID_dictionary.get(uid, ("Unknown SOP Class",))[0]
 
 
-def to_primitive(value):
-    """Convert a pydicom element value to a parquet-friendly scalar. Multi-values become a JSON list.
-    Anything unconvertible (bytes, sequences, person names, invalid numbers) becomes None."""
+def to_primitive(value: Any) -> bool | int | float | str | None:
+    """Converts a pydicom element value to a parquet-friendly scalar.
+
+    Args:
+        value: An element value, as returned by `Dataset.get`.
+
+    Returns:
+        A bool, int, float or stripped str; a JSON list string for a multi-value;
+        None for anything unconvertible (bytes, sequences, person names, invalid
+        numbers) or empty.
+    """
     try:
         if value is None or value == "":
             return None
@@ -207,21 +348,35 @@ def to_primitive(value):
             return float(value)
         if isinstance(value, int):  # IS, US, UL, SS, SL
             return int(value)
-        if isinstance(value, str) and not isinstance(value, pydicom.valuerep.PersonName):
+        if isinstance(value, str) and not isinstance(
+            value, pydicom.valuerep.PersonName
+        ):
             return value.strip()
     except (TypeError, ValueError, OverflowError):
         pass
     return None
 
 
-def compute_fps(ds, default_fps: float) -> float:
-    """CineRate -> 1000/FrameTime -> 1000/mean(FrameTimeVector) -> default (as in the old pipeline)."""
+def compute_fps(ds: pydicom.Dataset, default_fps: float) -> float:
+    """Returns the clip's frame rate.
+
+    Tries CineRate, then 1000/FrameTime, then 1000/mean(FrameTimeVector), as in the
+    old pipeline.
+
+    Args:
+        ds: Header dataset.
+        default_fps: Fallback when none of the tags gives a positive rate.
+
+    Returns:
+        Frames per second.
+    """
     try:
         if ds.get("CineRate") and float(ds.CineRate) > 0:
             return float(ds.CineRate)
         if ds.get("FrameTime") and float(ds.FrameTime) > 0:
             return 1000.0 / float(ds.FrameTime)
-        ftv = [float(v) for v in (ds.get("FrameTimeVector") or [])[1:]]  # first entry is always 0
+        # The first entry is always 0.
+        ftv = [float(v) for v in (ds.get("FrameTimeVector") or [])[1:]]
         if ftv and sum(ftv) > 0:
             return 1000.0 / (sum(ftv) / len(ftv))
     except (TypeError, ValueError):
@@ -229,20 +384,39 @@ def compute_fps(ds, default_fps: float) -> float:
     return float(default_fps)
 
 
-def shift_date(value, offset_days: int) -> str | None:
-    """Shift a DA (YYYYMMDD) or the date part of a DT value by `offset_days`. Unparseable -> None."""
+def shift_date(value: Any, offset_days: int) -> str | None:
+    """Shifts a DA (YYYYMMDD) or the date part of a DT value.
+
+    Args:
+        value: DA or DT value; any time part is kept unchanged.
+        offset_days: Days to add.
+
+    Returns:
+        The shifted value, or None if `value` is empty or unparseable.
+    """
     if not value:
         return None
     value = str(value).strip()
     try:
-        shifted = dt.datetime.strptime(value[:8], "%Y%m%d").date() + dt.timedelta(days=offset_days)
+        shifted = dt.datetime.strptime(value[:8], "%Y%m%d").date() + dt.timedelta(
+            days=offset_days
+        )
     except (ValueError, OverflowError):
         return None
     return shifted.strftime("%Y%m%d") + value[8:]
 
 
-def cap_age(value, cap: int) -> str | None:
-    """DICOM AS age (e.g. '045Y', '006M') -> same string, or f'{cap}+' when >= cap years. Unparseable -> None."""
+def cap_age(value: Any, cap: int) -> str | None:
+    """Caps a DICOM AS age (e.g. '045Y', '006M').
+
+    Args:
+        value: AS age string.
+        cap: Age in years at or above which the age is replaced.
+
+    Returns:
+        The stripped age, f"{cap}+" when it is `cap` years or more, or None if
+        empty or unparseable.
+    """
     if not value:
         return None
     value = str(value).strip()
@@ -256,17 +430,25 @@ def cap_age(value, cap: int) -> str | None:
     return f"{cap}+" if years >= cap else value
 
 
-def _text(ds, keyword) -> str:
+def _text(ds: pydicom.Dataset, keyword: str) -> str:
+    """Returns the element's value as a stripped string ("" if missing)."""
     value = ds.get(keyword)
     return "" if value is None else str(value).strip()
 
 
-def extract_header(path, cfg: dict) -> dict:
-    """Worker entry point: everything Script 1 needs from one file's header.
+def extract_header(path: str | Path, cfg: dict[str, Any]) -> dict[str, Any]:
+    """Reads everything Script 1 needs from one file's header (worker entry point).
 
-    `cfg` is the `index` section of the config. Returns a dict with `source_path`, `status` and
-    `detail`, plus (for status "ok") crosswalk fields, allowlisted metadata, raw dates, regions,
-    and geometry. Never raises.
+    Never raises: any exception becomes status "error" with the exception type
+    as detail.
+
+    Args:
+        path: DICOM file path.
+        cfg: The `index` section of the config.
+
+    Returns:
+        A dict with `source_path`, `status` and `detail`, plus (for status "ok")
+        crosswalk fields, allowlisted metadata, raw dates, regions, and geometry.
     """
     out = {"source_path": str(path), "status": "error", "detail": None}
     try:
@@ -308,14 +490,30 @@ def extract_header(path, cfg: dict) -> dict:
         return {**out, "status": "error", "detail": type(e).__name__}
 
 
-# ---------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # Pixel decoding (Script 2)
-# ---------------------------------------------------------------------------------------------------
-SUPPORTED_PHOTOMETRIC = ["RGB", "YBR_FULL", "YBR_FULL_422", "YBR_RCT", "YBR_ICT", "YBR_PARTIAL_420",
-                         "PALETTE COLOR", "MONOCHROME1", "MONOCHROME2"]
+# --------------------------------------------------------------------------------------
+SUPPORTED_PHOTOMETRIC = [
+    "RGB",
+    "YBR_FULL",
+    "YBR_FULL_422",
+    "YBR_RCT",
+    "YBR_ICT",
+    "YBR_PARTIAL_420",
+    "PALETTE COLOR",
+    "MONOCHROME1",
+    "MONOCHROME2",
+]
 
 
-def _frame_to_rgb(frame: np.ndarray, photometric: str, ds) -> np.ndarray:
+def _frame_to_rgb(
+    frame: np.ndarray, photometric: str, ds: pydicom.Dataset
+) -> np.ndarray:
+    """Converts one decoded frame to (H, W, 3) uint8 RGB.
+
+    Raises:
+        ValueError: The pixels are not 8-bit after any palette lookup.
+    """
     if photometric == "PALETTE COLOR":
         frame = apply_color_lut(frame, ds)
         if frame.dtype == np.uint16:  # LUTs are often 16-bit; scale to 8-bit
@@ -330,11 +528,21 @@ def _frame_to_rgb(frame: np.ndarray, photometric: str, ds) -> np.ndarray:
     return frame
 
 
-def decode_frames(path) -> np.ndarray:
-    """Decode all frames of a DICOM file into a (N, H, W, 3) uint8 RGB array.
+def decode_frames(path: str | Path) -> np.ndarray:
+    """Decodes all frames of a DICOM file into a (N, H, W, 3) uint8 RGB array.
 
-    Frames are decoded one at a time (pydicom frame-level decoding) into a preallocated array, so a
-    compressed clip is never held twice in memory. Raises on unsupported or undecodable pixel data.
+    Frames are decoded one at a time (pydicom frame-level decoding) into a
+    preallocated array, so a compressed clip is never held twice in memory.
+
+    Args:
+        path: DICOM file path.
+
+    Returns:
+        The decoded frames; N is at most NumberOfFrames.
+
+    Raises:
+        ValueError: Unsupported PhotometricInterpretation, non-8-bit pixels, or no
+            frames decoded. pydicom may raise other errors for undecodable data.
     """
     ds, _ = read_header(path)
     photometric = str(ds.get("PhotometricInterpretation", "")).strip()
