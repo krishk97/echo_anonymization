@@ -5,13 +5,13 @@ paths:
   # Root directory containing the raw DICOM files (searched recursively).
   dicom_root: /path/to/raw_dicoms
   dicom_extension: dcm
-  # SECURE area (contains PHI): crosswalk.csv, manifest/, status/, logs. Keep access restricted.
+  # SECURE area (contains PHI): anonymization_crosswalk.csv, manifest/, status/, logs. Keep access restricted.
   secure_dir: /path/to/secure
-  # Anonymized outputs: file/<anon_patient>/<anon_study>/<name>.<png|avi>, results/, echo-record-list.parquet,
+  # Anonymized outputs: file/<AnonPatientID>/<AnonStudyID>/<name>.<png|avi>, results/, echo-record-list.parquet,
   # echo-study-list.csv
   output_root: /path/to/anonymized
 
-# ---------------- Script 1: index_and_anonymize.py (CPU) ----------------
+# ---------------- Script 1: create_anonymization_plan.py (CPU) ----------------
 index:
   num_workers: 32
   chunk_size: 10000
@@ -24,7 +24,7 @@ index:
   date_offset_days: [36159, 36525]
   age_cap_years: 90
   default_fps: 30
-  # Dates that are copied after shifting (stored as <Keyword>_shifted).
+  # Dates that are copied after shifting (stored as <Keyword>Shifted).
   date_fields: [StudyDate, SeriesDate, AcquisitionDate, ContentDate, AcquisitionDateTime]
   # Only these header fields are copied into the manifest/results. Never add free-text fields
   # (descriptions, comments, names, institution, operator...) or private tags.
@@ -50,9 +50,12 @@ index:
     - HeartRate
     - UltrasoundColorDataPresent
 
-# ---------------- Script 2: preprocess_and_classify.py (GPU) ----------------
+# ---------------- Script 2: run_echo_preprocessing_and_anonymization_with_classifier.py (GPU) ----------------
 preprocess:
   num_gpus: 4
+  # Only for run_echo_preprocessing_and_anonymization.py (no GPU, no view classifiers): number of CPU processes.
+  # Each one also starts `num_workers` DataLoader workers.
+  num_cpu_procs: 8
   # DataLoader settings (per GPU process)
   num_workers: 4
   prefetch_factor: 2

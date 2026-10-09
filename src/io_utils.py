@@ -1,10 +1,11 @@
-import logging
 import os
+import sys
 import time
 from pathlib import Path
 
 import pandas as pd
 import yaml
+from loguru import logger
 
 
 def load_config(path) -> dict:
@@ -45,10 +46,7 @@ def setup_logging(log_dir, name: str, level: str = "INFO") -> None:
     """Log to stderr and to `<log_dir>/<name>_<timestamp>.log`."""
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(),
-                  logging.FileHandler(log_dir / f"{name}_{time.strftime('%Y%m%dT%H%M%S')}.log")],
-        force=True,
-    )
+    fmt = "{time:YYYY-MM-DD HH:mm:ss,SSS} {level} {name}: {message}"
+    logger.remove()
+    logger.add(sys.stderr, level=level, format=fmt)
+    logger.add(log_dir / f"{name}_{time.strftime('%Y%m%dT%H%M%S')}.log", level=level, format=fmt)

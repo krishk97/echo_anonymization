@@ -1,4 +1,20 @@
-import logging
+"""Script 2 (GPU): decode, crop/mask, classify (EchoFine + EchoPrime) and save every pending manifest record.
+
+Subcommands:
+  run    process pending records with one spawned process per GPU
+  merge  combine result parts into the final anonymized results table
+
+Restartable: the done set is every RecordID already in a result part (any status); `--retry-errors`
+re-queues records whose latest status is `error`. A result row is written only after both models
+have run and the media file has been saved atomically. Records saved by `run_echo_preprocessing_and_anonymization.py` (status
+`preprocessed`, no view columns) are not done here: `run` redoes them with classification.
+
+Model inputs (per source file / record):
+  - EchoFine:  the full, unmasked frames (as in the old pipeline), run once per source file and
+               shared by all of that file's region records.
+  - EchoPrime: the record's preprocessed (cropped + PHI-masked) media.
+Only the preprocessed media is written to disk.
+"""
 import multiprocessing as mp
 import os
 import time
@@ -11,6 +27,7 @@ from typing import Callable
 import numpy as np
 import pandas as pd
 import torch
+from loguru import logger
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
@@ -19,19 +36,19 @@ from src.image_utils import crop_and_scale, mask_outside_ultrasound_video, save_
 from src.io_utils import atomic_write_parquet, load_config, read_parquet_dir, setup_logging
 from src.view_classifier.echoprime import ECHOPRIME_VIEWS, classify_view_torch, setup_echoprime_view_classifier
 
-logger = logging.getLogger("preprocess_and_classify")
 
 MODEL_RESOLUTION = (224, 224)
 # Manifest columns passed to the GPU processes (everything else stays in the manifest)
-RECORD_FIELDS = ["item_id", "output_path", "item_type", "fps", "oversize"]
-RECORD_FIELDS += [f"{p}_{c}" for p in ("bbox", "bbox_2d", "bbox_1d") for c in ("x0", "y0", "x1", "y1")]
+BBOX_COLUMNS = [f"{p}{c}" for p in ("BBox", "BBox2D", "BBox1D") for c in ("X0", "Y0", "X1", "Y1")]
+RECORD_FIELDS = ["RecordID", "OutputPath", "ItemType", "FPS", "Oversize"] + BBOX_COLUMNS
 # Manifest columns copied into the final table (besides the config allowlist and shifted dates).
-# This is a keep-list: source_path and anything else not listed here never reach the final table.
-MANIFEST_KEEP = ["item_id", "anon_patient", "anon_study", "output_path", "item_type", "sop_class", "num_frames", "fps",
-                 "region_source", "region_index", "spatial_format", "data_type", "regions_json", "decoded_bytes",
-                 "oversize", "PatientAge_capped"]
-MANIFEST_KEEP += [f"{p}_{c}" for p in ("bbox", "bbox_2d", "bbox_1d") for c in ("x0", "y0", "x1", "y1")]
-RESULT_KEEP = ["status", "error_type", "pipeline_version", "timestamp"]
+# This is a keep-list: SourcePath and anything else not listed here never reach the final table.
+MANIFEST_KEEP = ["RecordID", "AnonPatientID", "AnonStudyID", "OutputPath", "ItemType", "SOPClass", "NumFrames", "FPS",
+                 "RegionSource", "RegionIndex", "SpatialFormat", "DataType", "RegionsJSON", "DecodedBytes",
+                 "Oversize", "PatientAgeCapped"] + BBOX_COLUMNS
+RESULT_KEEP = ["Status", "ErrorType", "PipelineVersion", "Timestamp"]
+# Prefixes of the view-classification columns written by summarize()
+MODEL_COL_PREFIXES = ("EchoFine_", "EchoPrime_", "View_", "ViewScore_")
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -39,7 +56,7 @@ RESULT_KEEP = ["status", "error_type", "pipeline_version", "timestamp"]
 # ---------------------------------------------------------------------------------------------------
 def _bbox(rec: dict, prefix: str):
     """(x0, y0, x1, y1) from a manifest record, or None if absent."""
-    box = tuple(rec[f"{prefix}_{c}"] for c in ("x0", "y0", "x1", "y1"))
+    box = tuple(rec[f"{prefix}{c}"] for c in ("X0", "Y0", "X1", "Y1"))
     return None if box[0] is None else tuple(int(v) for v in box)
 
 
@@ -52,7 +69,7 @@ class AnonymizedEchoDataset(Dataset):
     """One item = one source file with all of its pending records, so a file is decoded only once.
 
     Returns {"echofine_in": (N,224,224,3) or None, "records": [...]}, where each record dict has
-    item_id/output_path/item_type/fps/status/error_type and, when status is "ok", the preprocessed
+    RecordID/OutputPath/ItemType/FPS/Status/ErrorType and, when Status is "ok", the preprocessed
     `media` to save and the `echoprime_in` model input. Never raises: failures become skip/error records.
     """
 
@@ -64,10 +81,10 @@ class AnonymizedEchoDataset(Dataset):
 
     def __getitem__(self, index):
         source_path, records = self.files[index]
-        base = [{k: r[k] for k in ("item_id", "output_path", "item_type", "fps")} for r in records]
-        mark = lambda status, err=None: [{**b, "status": status, "error_type": err} for b in base]
+        base = [{k: r[k] for k in ("RecordID", "OutputPath", "ItemType", "FPS")} for r in records]
+        mark = lambda status, err=None: [{**b, "Status": status, "ErrorType": err} for b in base]
 
-        if records[0]["oversize"]:
+        if records[0]["Oversize"]:
             return {"echofine_in": None, "records": mark("skipped_oversize")}
         try:
             frames = decode_frames(source_path)
@@ -81,15 +98,15 @@ class AnonymizedEchoDataset(Dataset):
         out = []
         for rec, b in zip(records, base):
             try:
-                if rec["item_type"] == "video":
-                    media = self.preprocess_echo_video(frames, _bbox(rec, "bbox"))
+                if rec["ItemType"] == "video":
+                    media = self.preprocess_echo_video(frames, _bbox(rec, "BBox"))
                     echoprime_in = resize_frames(media)
                 else:
-                    media = self.preprocess_echo_image(frames[0], _bbox(rec, "bbox_2d"), _bbox(rec, "bbox_1d"))
+                    media = self.preprocess_echo_image(frames[0], _bbox(rec, "BBox2D"), _bbox(rec, "BBox1D"))
                     echoprime_in = resize_frames(media[np.newaxis])
-                out.append({**b, "status": "ok", "error_type": None, "media": media, "echoprime_in": echoprime_in})
+                out.append({**b, "Status": "ok", "ErrorType": None, "media": media, "echoprime_in": echoprime_in})
             except Exception as e:
-                out.append({**b, "status": "error", "error_type": type(e).__name__})
+                out.append({**b, "Status": "error", "ErrorType": type(e).__name__})
         return {"echofine_in": echofine_in, "records": out}
 
     @staticmethod
@@ -162,12 +179,12 @@ def load_models(cfg: dict) -> Models:
     )
 
 
-def summarize(prefix: str, probits: np.ndarray, views: list[str]) -> dict:
-    """Per-view mean and std over frames, plus the argmax view."""
-    mean, std = probits.mean(axis=0), probits.std(axis=0)
-    out = {f"{prefix}_{v}": float(mean[i]) for i, v in enumerate(views)}
-    out.update({f"{prefix}_{v}_std": float(std[i]) for i, v in enumerate(views)})
-    out[f"{prefix}_view"] = views[int(mean.argmax())]
+def summarize(model: str, probits: np.ndarray, views: list[str]) -> dict:
+    """Per-view score over frames, score = mean / (1 + std), plus the top-scoring view and its score."""
+    score = probits.mean(axis=0) / (1 + probits.std(axis=0))
+    out = {f"{model}_View={v}": float(score[i]) for i, v in enumerate(views)}
+    best = int(score.argmax())
+    out[f"View_{model}"], out[f"ViewScore_{model}"] = views[best], float(score[best])
     return out
 
 
@@ -195,7 +212,7 @@ class ResultWriter:
         self.rows: list[dict] = []
 
     def add(self, row: dict) -> None:
-        self.rows.append({**row, "pipeline_version": self.pipeline_version, "timestamp": pd.Timestamp.now(tz="UTC")})
+        self.rows.append({**row, "PipelineVersion": self.pipeline_version, "Timestamp": pd.Timestamp.now(tz="UTC")})
         if len(self.rows) >= self.flush_every:
             self.flush()
 
@@ -206,8 +223,41 @@ class ResultWriter:
             self.rows = []
 
 
-def run_rank(rank: int, files: list[tuple[str, list[dict]]], cfg: dict, models: Models) -> Counter:
-    """Process one shard of source files with already-loaded models. Returns counts by status."""
+def gpu_handle():
+    """NVML handle for this process's GPU, or None if NVML is unavailable (e.g. no driver).
+
+    NVML ignores CUDA_VISIBLE_DEVICES, so the device is looked up by the physical id (index or UUID)
+    the parent set for this rank.
+    """
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        dev = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+        if dev.startswith(("GPU-", "MIG-")):
+            return pynvml.nvmlDeviceGetHandleByUUID(dev)
+        return pynvml.nvmlDeviceGetHandleByIndex(int(dev))
+    except Exception:
+        return None
+
+
+def gpu_usage(handle) -> str:
+    """Device-wide GPU utilization and memory (covers both TF and torch), or "" if unavailable."""
+    if handle is None:
+        return ""
+    try:
+        import pynvml
+        util = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu
+        mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return f"gpu {util}% | mem {mem.used / 1e9:.1f}/{mem.total / 1e9:.1f} GB"
+    except Exception:
+        return ""
+
+
+def run_rank(rank: int, files: list[tuple[str, list[dict]]], cfg: dict, models: Models | None) -> Counter:
+    """Process one shard of source files with already-loaded models. Returns counts by status.
+
+    With `models=None` (run_echo_preprocessing_and_anonymization.py) the classifiers are skipped: media is saved and the row
+    gets status `preprocessed`."""
     pcfg = cfg["preprocess"]
     out_root = Path(cfg["paths"]["output_root"])
     media_root = out_root / "file"
@@ -220,38 +270,45 @@ def run_rank(rank: int, files: list[tuple[str, list[dict]]], cfg: dict, models: 
                              multiprocessing_context="spawn")
     loader = DataLoader(AnonymizedEchoDataset(files), **loader_kwargs)
 
-    counts, t0 = Counter(), time.time()
+    counts, t0, gpu = Counter(), time.time(), gpu_handle()
     for n_files, item in enumerate(loader, start=1):
         echofine, echofine_error = None, None
-        if item["echofine_in"] is not None:
+        if models is not None and item["echofine_in"] is not None:
             try:
-                echofine = summarize("echofine", models.echofine(item["echofine_in"]), models.echofine_views)
+                echofine = summarize("EchoFine", models.echofine(item["echofine_in"]), models.echofine_views)
             except Exception as e:
                 echofine_error = type(e).__name__
                 if isinstance(e, models.oom_errors):
                     torch.cuda.empty_cache()
 
         for rec in item["records"]:
-            row = {k: rec[k] for k in ("item_id", "output_path", "status", "error_type")}
-            if rec["status"] == "ok":
-                if echofine is None:
-                    row.update(status="error", error_type=echofine_error)
+            row = {k: rec[k] for k in ("RecordID", "OutputPath", "Status", "ErrorType")}
+            if rec["Status"] == "ok":
+                if models is None:
+                    try:
+                        save_media(media_root / rec["OutputPath"], rec["media"], rec["ItemType"], rec["FPS"],
+                                   pcfg["video_codec"])
+                        row.update(Status="preprocessed")
+                    except Exception as e:
+                        row.update(Status="error", ErrorType=type(e).__name__)
+                elif echofine is None:
+                    row.update(Status="error", ErrorType=echofine_error)
                 else:
                     try:
-                        echoprime = summarize("echoprime", models.echoprime(rec["echoprime_in"]), models.echoprime_views)
-                        save_media(media_root / rec["output_path"], rec["media"], rec["item_type"], rec["fps"],
+                        echoprime = summarize("EchoPrime", models.echoprime(rec["echoprime_in"]), models.echoprime_views)
+                        save_media(media_root / rec["OutputPath"], rec["media"], rec["ItemType"], rec["FPS"],
                                    pcfg["video_codec"])
-                        row.update(status="success", **echofine, **echoprime)
+                        row.update(Status="success", **echofine, **echoprime)
                     except Exception as e:
-                        row.update(status="error", error_type=type(e).__name__)
+                        row.update(Status="error", ErrorType=type(e).__name__)
                         if isinstance(e, models.oom_errors):
                             torch.cuda.empty_cache()
             writer.add(row)
-            counts[row["status"]] += 1
+            counts[row["Status"]] += 1
 
         if n_files % 100 == 0 or n_files == len(files):
-            logger.info("rank %d: %d/%d files (%.1f files/s) | %s", rank, n_files, len(files),
-                        n_files / (time.time() - t0), dict(counts))
+            logger.info("rank {}: {}/{} files ({:.1f} files/s) | {}{}", rank, n_files, len(files),
+                        n_files / (time.time() - t0), dict(counts), f" | {u}" if (u := gpu_usage(gpu)) else "")
     writer.flush()
     return counts
 
@@ -261,19 +318,22 @@ def _rank_entry(rank: int, files: list, cfg: dict, log_level: str) -> None:
     so it was already in place when this process imported torch."""
     setup_logging(Path(cfg["paths"]["output_root"]) / "logs", f"preprocess_rank{rank}", log_level)
     quiet_pydicom()
-    logger.info("rank %d: CUDA_VISIBLE_DEVICES=%s, %d files", rank, os.environ.get("CUDA_VISIBLE_DEVICES"), len(files))
-    run_rank(rank, files, cfg, load_models(cfg))
+    logger.info("rank {}: CUDA_VISIBLE_DEVICES={}, {} files", rank, os.environ.get("CUDA_VISIBLE_DEVICES"), len(files))
+    models = load_models(cfg)
+    logger.info("rank {}: models loaded | {}", rank, gpu_usage(gpu_handle()) or "GPU usage unavailable")
+    run_rank(rank, files, cfg, models)
 
 
 # ---------------------------------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------------------------------
 def latest_results(results: pd.DataFrame) -> pd.DataFrame:
-    """One row per item_id: the most recent one."""
-    return results.sort_values("timestamp", kind="stable").drop_duplicates("item_id", keep="last")
+    """One row per RecordID: the most recent one."""
+    return results.sort_values("Timestamp", kind="stable").drop_duplicates("RecordID", keep="last")
 
 
-def pending_records(cfg: dict, retry_errors: bool) -> pd.DataFrame:
+def pending_records(cfg: dict, retry_errors: bool, classify: bool = True) -> pd.DataFrame:
+    """Manifest records without a result yet. With `classify`, records only preprocessed (no views) are pending too."""
     manifest = read_parquet_dir(Path(cfg["paths"]["secure_dir"]) / "manifest")
     if not len(manifest):
         return manifest
@@ -282,18 +342,20 @@ def pending_records(cfg: dict, retry_errors: bool) -> pd.DataFrame:
     if len(results):
         latest = latest_results(results)
         if retry_errors:
-            latest = latest[latest["status"] != "error"]
-        done = set(latest["item_id"])
-    return manifest[~manifest["item_id"].isin(done)]
+            latest = latest[latest["Status"] != "error"]
+        if classify:
+            latest = latest[latest["Status"] != "preprocessed"]
+        done = set(latest["RecordID"])
+    return manifest[~manifest["RecordID"].isin(done)]
 
 
 def shard_files(pending: pd.DataFrame, n: int) -> list[list[tuple[str, list[dict]]]]:
     """Group records by source file (decode once), sort files by decoded size (largest first) and deal
     them round-robin across `n` ranks."""
     groups = []
-    for source_path, g in pending.groupby("source_path", sort=False):
+    for source_path, g in pending.groupby("SourcePath", sort=False):
         recs = g[RECORD_FIELDS].astype(object).where(g[RECORD_FIELDS].notna(), None).to_dict("records")
-        groups.append((int(g["decoded_bytes"].iloc[0]), source_path, recs))
+        groups.append((int(g["DecodedBytes"].iloc[0]), source_path, recs))
     groups.sort(key=lambda t: (-t[0], t[1]))
     return [[(src, recs) for _, src, recs in groups[r::n]] for r in range(n)]
 
@@ -306,7 +368,7 @@ def run(cfg: dict, retry_errors: bool, log_level: str) -> bool:
         return True
     n_gpus = cfg["preprocess"]["num_gpus"]
     shards = shard_files(pending, n_gpus)
-    logger.info("%d pending records in %d files, %d GPU processes", len(pending), sum(map(len, shards)), n_gpus)
+    logger.info("{} pending records in {} files, {} GPU processes", len(pending), sum(map(len, shards)), n_gpus)
 
     # Rank r uses the r-th GPU already visible to this job (respects a scheduler-set CUDA_VISIBLE_DEVICES).
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -332,29 +394,29 @@ def run(cfg: dict, retry_errors: bool, log_level: str) -> bool:
         p.join()
     failed = [p.name for p in procs if p.exitcode != 0]
     if failed:
-        logger.error("GPU processes exited with errors: %s -- rerun to resume", failed)
+        logger.error("GPU processes exited with errors: {} -- rerun to resume", failed)
         return False
     logger.info("All GPU processes finished")
     return True
 
 
 def study_list(table: pd.DataFrame, crosswalk_path: Path) -> pd.DataFrame:
-    """One row per study in the record list: subject_id, study_id, study_datetime (shifted StudyDate +
+    """One row per study in the record list: PatientID, StudyID, StudyDateTime (shifted StudyDate +
     StudyTime from the crosswalk; date only if the time is missing, NaT if the date is)."""
-    studies = table.reindex(columns=["anon_patient", "anon_study", "StudyDate_shifted"]).drop_duplicates("anon_study")
-    times = pd.read_csv(crosswalk_path, usecols=["anon_study", "StudyTime"], dtype=str, keep_default_na=False)
-    studies = studies.merge(times.drop_duplicates("anon_study"), on="anon_study", how="left")
-    date = studies["StudyDate_shifted"].fillna("").astype(str).str[:8]
+    studies = table.reindex(columns=["PatientID", "StudyID", "StudyDateShifted"]).drop_duplicates("StudyID")
+    times = pd.read_csv(crosswalk_path, usecols=["AnonStudyID", "StudyTime"], dtype=str, keep_default_na=False)
+    times = times.rename(columns={"AnonStudyID": "StudyID"}).drop_duplicates("StudyID")
+    studies = studies.merge(times, on="StudyID", how="left")
+    date = studies["StudyDateShifted"].fillna("").astype(str).str[:8]
     time = studies["StudyTime"].fillna("").str.strip().str.split(".").str[0].str.ljust(6, "0")
     with_time = pd.to_datetime(date + time, format="%Y%m%d%H%M%S", errors="coerce")
     date_only = pd.to_datetime(date, format="%Y%m%d", errors="coerce")
-    studies["study_datetime"] = with_time.fillna(date_only)
-    studies = studies.rename(columns={"anon_patient": "subject_id", "anon_study": "study_id"})
-    return studies[["subject_id", "study_id", "study_datetime"]].sort_values("study_id").reset_index(drop=True)
+    studies["StudyDateTime"] = with_time.fillna(date_only)
+    return studies[["PatientID", "StudyID", "StudyDateTime"]].sort_values("StudyID").reset_index(drop=True)
 
 
 def merge(cfg: dict) -> pd.DataFrame:
-    """Combine result parts into the final table: latest row per item_id, joined with the manifest's
+    """Combine result parts into the final table: latest row per RecordID, joined with the manifest's
     anonymized metadata through an explicit keep-list (no source paths or real identifiers)."""
     out_root = Path(cfg["paths"]["output_root"])
     results = read_parquet_dir(out_root / "results")
@@ -364,25 +426,27 @@ def merge(cfg: dict) -> pd.DataFrame:
         return pd.DataFrame()
 
     results = latest_results(results)
-    model_cols = [c for c in results.columns if c.startswith(("echofine_", "echoprime_"))]
+    model_cols = [c for c in results.columns if c.startswith(MODEL_COL_PREFIXES)]
     icfg = cfg["index"]
-    keep = MANIFEST_KEEP + [f"{k}_shifted" for k in icfg["date_fields"]] + list(icfg["metadata_allowlist"])
+    keep = MANIFEST_KEEP + [f"{k}Shifted" for k in icfg["date_fields"]] + list(icfg["metadata_allowlist"])
     keep = [c for c in dict.fromkeys(keep) if c in manifest.columns]
-    table = results[["item_id"] + RESULT_KEEP + model_cols].merge(manifest[keep], on="item_id", how="left")
-    table = table[keep + RESULT_KEEP + model_cols].sort_values("item_id").reset_index(drop=True)
+    table = results[["RecordID"] + RESULT_KEEP + model_cols].merge(manifest[keep], on="RecordID", how="left")
+    table = table[keep + RESULT_KEEP + model_cols].sort_values("RecordID").reset_index(drop=True)
+    # The anonymized IDs are the only patient/study IDs in the final outputs, so they drop the Anon prefix
+    table = table.rename(columns={"AnonPatientID": "PatientID", "AnonStudyID": "StudyID", "OutputPath": "FilePath"})
     atomic_write_parquet(table, out_root / "echo-record-list.parquet")
-    studies = study_list(table, Path(cfg["paths"]["secure_dir"]) / "crosswalk.csv")
+    studies = study_list(table, Path(cfg["paths"]["secure_dir"]) / "anonymization_crosswalk.csv")
     tmp = out_root / "echo-study-list.csv.tmp"
     studies.to_csv(tmp, index=False)
     os.replace(tmp, out_root / "echo-study-list.csv")
 
-    success = table["status"] == "success"
-    missing = sum(not (out_root / "file" / p).exists() for p in table.loc[success, "output_path"])
-    logger.info("Final table: %d records -> %s", len(table), out_root / "echo-record-list.parquet")
-    logger.info("Study list: %d studies -> %s", len(studies), out_root / "echo-study-list.csv")
-    logger.info("QA counts by status: %s", table["status"].value_counts().to_dict())
-    logger.info("QA success records with missing media file: %d", missing)
-    logger.info("QA manifest records without a result yet: %d", int((~manifest["item_id"].isin(table["item_id"])).sum()))
+    success = table["Status"].isin(["success", "preprocessed"])
+    missing = sum(not (out_root / "file" / p).exists() for p in table.loc[success, "FilePath"])
+    logger.info("Final table: {} records -> {}", len(table), out_root / "echo-record-list.parquet")
+    logger.info("Study list: {} studies -> {}", len(studies), out_root / "echo-study-list.csv")
+    logger.info("QA counts by status: {}", table["Status"].value_counts().to_dict())
+    logger.info("QA success records with missing media file: {}", missing)
+    logger.info("QA manifest records without a result yet: {}", int((~manifest["RecordID"].isin(table["RecordID"])).sum()))
     return table
 
 
@@ -407,6 +471,6 @@ def cli() -> None:
 
 if __name__ == "__main__":
     # Re-import under the real module name so the Dataset and process targets pickle as
-    # `preprocess_and_classify.X` (not `__main__.X`) for the spawned GPU and DataLoader processes.
-    import preprocess_and_classify
-    preprocess_and_classify.cli()
+    # `run_echo_preprocessing_and_anonymization_with_classifier.X` (not `__main__.X`) for the spawned GPU and DataLoader processes.
+    import run_echo_preprocessing_and_anonymization_with_classifier
+    run_echo_preprocessing_and_anonymization_with_classifier.cli()
