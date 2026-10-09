@@ -20,6 +20,8 @@ dependencies = [
     "torchvision>=0.21",
     "tensorflow[and-cuda]>=2.16",
     "tf_keras",  # needed by src/view_classifier/echofine.py
+    "nvidia-ml-py>=13.615.71",  # provides pynvml (GPU usage in the Script 2 progress log)
+    "loguru>=0.7.3",
 ]
 
 [dependency-groups]

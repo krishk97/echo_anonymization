@@ -9,16 +9,15 @@ trailing newline; on load that partial line is truncated away and the counters a
 the maximum existing IDs.
 """
 import csv
-import logging
 import os
 import secrets
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 PATIENT_FIELDS = ["PatientID", "PatientName", "PatientSex", "PatientAge", "PatientBirthDate"]
 STUDY_FIELDS = ["AccessionNumber", "StudyID", "StudyInstanceUID", "StudyDate", "StudyTime"]
-CROSSWALK_COLUMNS = PATIENT_FIELDS + STUDY_FIELDS + ["anon_patient", "anon_study", "date_offset_days"]
+ANON_CROSSWALK_COLUMNS = PATIENT_FIELDS + STUDY_FIELDS + ["AnonPatientID", "AnonStudyID", "DateOffsetDays"]
 
 
 def _format_id(prefix: str, n: int) -> str:
@@ -33,12 +32,12 @@ def _clean(value) -> str:
     return "" if value is None else str(value).replace("\r", " ").replace("\n", " ")
 
 
-class Crosswalk:
+class AnonCrosswalk:
     def __init__(self, path, date_offset_range: tuple[int, int]):
         self.path = Path(path)
         self.date_offset_range = date_offset_range
-        self.patients: dict[str, tuple[str, int]] = {}  # PatientID -> (anon_patient, date_offset_days)
-        self.studies: dict[str, tuple[str, str, int]] = {}  # StudyInstanceUID -> (anon_patient, anon_study, offset)
+        self.patients: dict[str, tuple[str, int]] = {}  # PatientID -> (AnonPatientID, DateOffsetDays)
+        self.studies: dict[str, tuple[str, str, int]] = {}  # StudyInstanceUID -> (AnonPatientID, AnonStudyID, offset)
         self.next_patient = 0
         self.next_study = 0
         self.key_conflicts = 0  # studies seen again under a different PatientID
@@ -48,37 +47,37 @@ class Crosswalk:
     def _load(self) -> None:
         if not self.path.exists() or self.path.stat().st_size == 0:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._append_lines([CROSSWALK_COLUMNS])
+            self._append_lines([ANON_CROSSWALK_COLUMNS])
             return
 
         # Drop a truncated final line left by a crash mid-append.
         data = self.path.read_bytes()
         if not data.endswith(b"\n"):
             keep = data.rfind(b"\n") + 1
-            logger.warning("Crosswalk: dropping truncated final line (%d bytes)", len(data) - keep)
+            logger.warning("Crosswalk: dropping truncated final line ({} bytes)", len(data) - keep)
             with open(self.path, "r+b") as f:
                 f.truncate(keep)
                 f.flush()
                 os.fsync(f.fileno())
             if keep == 0:  # even the header was partial
-                self._append_lines([CROSSWALK_COLUMNS])
+                self._append_lines([ANON_CROSSWALK_COLUMNS])
                 return
 
         with open(self.path, newline="") as f:
             rows = list(csv.reader(f))
-        if rows[0] != CROSSWALK_COLUMNS:
+        if rows[0] != ANON_CROSSWALK_COLUMNS:
             raise ValueError("Crosswalk header does not match the expected columns")
         for line_no, row in enumerate(rows[1:], start=2):
-            if len(row) != len(CROSSWALK_COLUMNS):
+            if len(row) != len(ANON_CROSSWALK_COLUMNS):
                 # A complete (newline-terminated) line with the wrong field count is not a crash artifact.
-                raise ValueError(f"Crosswalk line {line_no} has {len(row)} fields, expected {len(CROSSWALK_COLUMNS)}")
-            rec = dict(zip(CROSSWALK_COLUMNS, row))
-            offset = int(rec["date_offset_days"])
-            self.patients.setdefault(rec["PatientID"], (rec["anon_patient"], offset))
-            self.studies[rec["StudyInstanceUID"]] = (rec["anon_patient"], rec["anon_study"], offset)
-            self.next_patient = max(self.next_patient, _parse_id(rec["anon_patient"]) + 1)
-            self.next_study = max(self.next_study, _parse_id(rec["anon_study"]) + 1)
-        logger.info("Crosswalk loaded: %d patients, %d studies", len(self.patients), len(self.studies))
+                raise ValueError(f"Crosswalk line {line_no} has {len(row)} fields, expected {len(ANON_CROSSWALK_COLUMNS)}")
+            rec = dict(zip(ANON_CROSSWALK_COLUMNS, row))
+            offset = int(rec["DateOffsetDays"])
+            self.patients.setdefault(rec["PatientID"], (rec["AnonPatientID"], offset))
+            self.studies[rec["StudyInstanceUID"]] = (rec["AnonPatientID"], rec["AnonStudyID"], offset)
+            self.next_patient = max(self.next_patient, _parse_id(rec["AnonPatientID"]) + 1)
+            self.next_study = max(self.next_study, _parse_id(rec["AnonStudyID"]) + 1)
+        logger.info("Crosswalk loaded: {} patients, {} studies", len(self.patients), len(self.studies))
 
     def _append_lines(self, rows: list[list[str]]) -> None:
         with open(self.path, "a", newline="") as f:
@@ -126,5 +125,5 @@ class Crosswalk:
         return len(new_rows)
 
     def lookup(self, study_uid: str) -> tuple[str, str, int]:
-        """(anon_patient, anon_study, date_offset_days) for an already-assigned study."""
+        """(AnonPatientID, AnonStudyID, DateOffsetDays) for an already-assigned study."""
         return self.studies[study_uid]

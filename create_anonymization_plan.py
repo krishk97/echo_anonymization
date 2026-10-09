@@ -6,7 +6,6 @@ Per chunk the order is: crosswalk append (fsync) -> manifest part -> status part
 the commit marker; a manifest part without its status part is deleted on startup and redone.
 """
 import json
-import logging
 import multiprocessing as mp
 import re
 import time
@@ -16,17 +15,16 @@ from functools import partial
 from pathlib import Path
 
 import pandas as pd
+from loguru import logger
 
-from src.crosswalk import Crosswalk
+from src.anon_crosswalk import AnonCrosswalk
 from src.io_utils import atomic_write_parquet, load_config, read_parquet_dir, setup_logging
 from src.dicom_utils import (cap_age, extract_header, full_frame_region, quiet_pydicom, select_image_regions,
                              select_video_regions, shift_date)
 
-logger = logging.getLogger("index_and_anonymize")
 
-INT_COLUMNS = ["num_frames", "region_index", "bbox_x0", "bbox_y0", "bbox_x1", "bbox_y1",
-               "spatial_format", "data_type", "decoded_bytes"]
-INT_COLUMNS += [f"bbox_{k}_{c}" for k in ("2d", "1d") for c in ("x0", "y0", "x1", "y1")]
+INT_COLUMNS = ["NumFrames", "RegionIndex", "SpatialFormat", "DataType", "DecodedBytes"]
+INT_COLUMNS += [f"{p}{c}" for p in ("BBox", "BBox2D", "BBox1D") for c in ("X0", "Y0", "X1", "Y1")]
 
 
 def find_files_by_extension(folder, extension):
@@ -50,7 +48,7 @@ def find_files_by_extension(folder, extension):
 # ---------------------------------------------------------------------------------------------------
 # Output naming
 #
-# Deterministic output naming: `<anon_patient>/<anon_study>/<name>` (item_id; the extension is added separately).
+# Deterministic output naming: `<AnonPatientID>/<AnonStudyID>/<name>` (RecordID; the extension is added separately).
 #
 # Rules (first claimer wins; an assigned name never changes):
 #   - base name is the InstanceNumber, e.g. `12`
@@ -59,15 +57,15 @@ def find_files_by_extension(folder, extension):
 #     missing): `12_s3`, then `-<k>` (k = 2, 3, ...) if that is taken too: `12_s3-2`
 #   - missing InstanceNumber -> `na<k>`, k = next free number in the study: `na0`, `na1`
 #
-# The registry holds "stems" (`<anon_patient>/<anon_study>/<base>`, i.e. item_id without `_r<i>`),
+# The registry holds "stems" (`<AnonPatientID>/<AnonStudyID>/<base>`, i.e. RecordID without `_r<i>`),
 # so a file is compared to other files, not to its own regions. It must contain every stem already
 # assigned in earlier chunks/runs; with files processed in sorted-path order, names are reproducible.
 # ---------------------------------------------------------------------------------------------------
 _REGION_SUFFIX = re.compile(r"_r\d+$")
 
 
-def stem_of(item_id: str) -> str:
-    return _REGION_SUFFIX.sub("", item_id)
+def stem_of(record_id: str) -> str:
+    return _REGION_SUFFIX.sub("", record_id)
 
 
 def assign_stem(anon_patient: str, anon_study: str, instance_number, series_number, registry: set[str]) -> str:
@@ -91,15 +89,15 @@ def assign_stem(anon_patient: str, anon_study: str, instance_number, series_numb
     return stem
 
 
-def item_id_for(stem: str, region_index: int | None, multi_region: bool) -> str:
+def record_id_for(stem: str, region_index: int | None, multi_region: bool) -> str:
     return f"{stem}_r{region_index}" if multi_region else stem
 
 
 def _bbox_columns(prefix: str, region) -> dict:
-    return {f"{prefix}_{c}": (getattr(region, c) if region is not None else None) for c in ("x0", "y0", "x1", "y1")}
+    return {f"{prefix}{c.upper()}": (getattr(region, c) if region is not None else None) for c in ("x0", "y0", "x1", "y1")}
 
 
-def build_records(header: dict, crosswalk: Crosswalk, registry: set[str], cfg: dict) -> list[dict]:
+def build_records(header: dict, crosswalk: AnonCrosswalk, registry: set[str], cfg: dict) -> list[dict]:
     """Manifest records for one included file (empty if a video has no usable region)."""
     anon_patient, anon_study, offset = crosswalk.lookup(header["crosswalk"]["StudyInstanceUID"])
     regions = header["regions"]
@@ -117,38 +115,38 @@ def build_records(header: dict, crosswalk: Crosswalk, registry: set[str], cfg: d
 
     stem = assign_stem(anon_patient, anon_study, header["instance_number"], header["series_number"], registry)
     common = {
-        "source_path": header["source_path"],
-        "anon_patient": anon_patient,
-        "anon_study": anon_study,
-        "item_type": "video" if is_video else "image",
-        "sop_class": header["detail"],
-        "num_frames": header["num_frames"],
-        "fps": header["fps"],
-        "region_source": region_source,
-        "regions_json": json.dumps([r.to_dict() for r in regions]),
-        "decoded_bytes": header["decoded_bytes"],
-        "oversize": header["decoded_bytes"] > cfg["max_decoded_gb"] * 1e9,
-        "PatientAge_capped": cap_age(header["patient_age"], cfg["age_cap_years"]),
-        **{f"{k}_shifted": shift_date(v, offset) for k, v in header["dates"].items()},
+        "SourcePath": header["source_path"],
+        "AnonPatientID": anon_patient,
+        "AnonStudyID": anon_study,
+        "ItemType": "video" if is_video else "image",
+        "SOPClass": header["detail"],
+        "NumFrames": header["num_frames"],
+        "FPS": header["fps"],
+        "RegionSource": region_source,
+        "RegionsJSON": json.dumps([r.to_dict() for r in regions]),
+        "DecodedBytes": header["decoded_bytes"],
+        "Oversize": header["decoded_bytes"] > cfg["max_decoded_gb"] * 1e9,
+        "PatientAgeCapped": cap_age(header["patient_age"], cfg["age_cap_years"]),
+        **{f"{k}Shifted": shift_date(v, offset) for k, v in header["dates"].items()},
         **header["metadata"],
     }
     records = []
     for region in targets:
-        item_id = item_id_for(stem, region.index if region else None, len(targets) > 1)
-        rec = {"item_id": item_id, "output_path": item_id + (".avi" if is_video else ".png"), **common}
+        record_id = record_id_for(stem, region.index if region else None, len(targets) > 1)
+        rec = {"RecordID": record_id, "OutputPath": record_id + (".avi" if is_video else ".png"), **common}
         if is_video:
-            rec.update({"region_index": region.index, **_bbox_columns("bbox", region),
-                        "spatial_format": region.spatial_format, "data_type": region.data_type,
-                        **_bbox_columns("bbox_2d", None), **_bbox_columns("bbox_1d", None)})
+            rec.update({"RegionIndex": region.index, **_bbox_columns("BBox", region),
+                        "SpatialFormat": region.spatial_format, "DataType": region.data_type,
+                        **_bbox_columns("BBox2D", None), **_bbox_columns("BBox1D", None)})
         else:
-            rec.update({"region_index": None, **_bbox_columns("bbox", None),
-                        "spatial_format": None, "data_type": None,
-                        **_bbox_columns("bbox_2d", two_d), **_bbox_columns("bbox_1d", one_d)})
+            rec.update({"RegionIndex": None, **_bbox_columns("BBox", None),
+                        "SpatialFormat": None, "DataType": None,
+                        **_bbox_columns("BBox2D", two_d), **_bbox_columns("BBox1D", one_d)})
         records.append(rec)
     return records
 
 
-def process_chunk(headers: list[dict], crosswalk: Crosswalk, registry: set[str], cfg: dict):
+def process_chunk(headers: list[dict], crosswalk: AnonCrosswalk, registry: set[str], cfg: dict):
     """Single-writer step for one chunk: extend the crosswalk, then build manifest and status rows."""
     included = [h for h in headers if h["status"] == "ok"]
     crosswalk.assign([h["crosswalk"] for h in included])
@@ -161,7 +159,7 @@ def process_chunk(headers: list[dict], crosswalk: Crosswalk, registry: set[str],
             manifest_rows.extend(records)
             n = len(records)
             status = "included" if n else "excluded_no_video_region"
-        status_rows.append({"source_path": h["source_path"], "status": status, "detail": h["detail"], "n_records": n})
+        status_rows.append({"SourcePath": h["source_path"], "Status": status, "Detail": h["detail"], "NumRecords": n})
 
     manifest = pd.DataFrame(manifest_rows)
     for c in INT_COLUMNS:
@@ -179,12 +177,12 @@ def load_state(manifest_dir: Path, status_dir: Path) -> tuple[set[str], set[str]
     committed = {p.name for p in status_dir.glob("*.parquet")}
     for part in manifest_dir.glob("*.parquet"):
         if part.name not in committed:
-            logger.warning("Removing uncommitted manifest part %s (no status part)", part.name)
+            logger.warning("Removing uncommitted manifest part {} (no status part)", part.name)
             part.unlink()
     status = read_parquet_dir(status_dir)
     manifest = read_parquet_dir(manifest_dir)
-    done = set(status["source_path"]) if len(status) else set()
-    registry = {stem_of(i) for i in manifest["item_id"]} if len(manifest) else set()
+    done = set(status["SourcePath"]) if len(status) else set()
+    registry = {stem_of(i) for i in manifest["RecordID"]} if len(manifest) else set()
     return done, registry
 
 
@@ -194,7 +192,7 @@ def main(cfg: dict) -> Counter:
     secure = Path(paths["secure_dir"])
     manifest_dir, status_dir = secure / "manifest", secure / "status"
 
-    crosswalk = Crosswalk(secure / "crosswalk.csv", tuple(icfg["date_offset_days"]))
+    crosswalk = AnonCrosswalk(secure / "anonymization_crosswalk.csv", tuple(icfg["date_offset_days"]))
     done, registry = load_state(manifest_dir, status_dir)
 
     logger.info("Discovering files...")
@@ -202,7 +200,7 @@ def main(cfg: dict) -> Counter:
     pending = [f for f in files if f not in done]
     chunk_size = icfg["chunk_size"]
     chunks = [pending[i:i + chunk_size] for i in range(0, len(pending), chunk_size)]
-    logger.info("%d files found, %d already done, %d pending in %d chunks", len(files), len(files) - len(pending),
+    logger.info("{} files found, {} already done, {} pending in {} chunks", len(files), len(files) - len(pending),
                 len(pending), len(chunks))
 
     # Part files are numbered by a global sequence that continues across runs.
@@ -221,20 +219,20 @@ def main(cfg: dict) -> Counter:
             atomic_write_parquet(manifest, manifest_dir / name)
             atomic_write_parquet(status, status_dir / name)  # commit marker, written last
 
-            status_counts.update(status["status"])
-            excluded_sop.update(status.loc[status["status"] == "excluded_sop_class", "detail"])
+            status_counts.update(status["Status"])
+            excluded_sop.update(status.loc[status["Status"] == "excluded_sop_class", "Detail"])
             n_records += len(manifest)
-            logger.info("Chunk %d/%d: %d files -> %d records in %.1fs | %s", k + 1, len(chunks), len(chunk),
-                        len(manifest), time.time() - t0, dict(Counter(status["status"])))
+            logger.info("Chunk {}/{}: {} files -> {} records in {:.1f}s | {}", k + 1, len(chunks), len(chunk),
+                        len(manifest), time.time() - t0, dict(Counter(status["Status"])))
     finally:
         if pool:
             pool.close()
             pool.join()
 
-    logger.info("Run summary: %d records written; files by status: %s", n_records, dict(status_counts))
+    logger.info("Run summary: {} records written; files by status: {}", n_records, dict(status_counts))
     if excluded_sop:
-        logger.info("Excluded by SOP class: %s", dict(excluded_sop))
-    logger.info("Crosswalk: %d patients, %d studies; studies seen under a different PatientID: %d",
+        logger.info("Excluded by SOP class: {}", dict(excluded_sop))
+    logger.info("Crosswalk: {} patients, {} studies; studies seen under a different PatientID: {}",
                 len(crosswalk.patients), len(crosswalk.studies), crosswalk.key_conflicts)
     return status_counts
 

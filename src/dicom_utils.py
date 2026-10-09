@@ -7,11 +7,10 @@ Errors are reported as the exception *type* only -- tag values and exception mes
 
 Pixel side (Script 2): `decode_frames` decodes a file once, frame by frame, into display-ready RGB.
 
-Regions: `find_us_regions` is a PLACEHOLDER meant to be replaced. Whatever replaces it must keep the
-same signature: take a header-only pydicom Dataset and return a list of `Region`. Everything downstream
-(record creation in Script 1, cropping/masking in Script 2) only uses the `Region` fields.
+Regions: `find_us_regions` takes a header-only pydicom Dataset and returns a list of `Region`. Everything
+downstream (record creation in Script 1, cropping/masking in Script 2) only uses the `Region` fields.
 Bounding boxes are half-open pixel ranges for direct numpy slicing: rows [y0, y1), cols [x0, x1).
-(DICOM's RegionLocationMaxX1/MaxY1 are inclusive, so the default implementation adds 1.)
+(DICOM's RegionLocationMaxX1/MaxY1 are inclusive, so `find_us_regions` adds 1.)
 """
 import datetime as dt
 import json
@@ -27,7 +26,7 @@ from pydicom.pixels import iter_pixels
 from pydicom.pixels.processing import apply_color_lut
 from pydicom.uid import UID_dictionary
 
-from src.crosswalk import PATIENT_FIELDS, STUDY_FIELDS
+from src.anon_crosswalk import PATIENT_FIELDS, STUDY_FIELDS
 
 REGION_DATA_TYPE_DICT = {
     0: None,
@@ -107,9 +106,9 @@ def _primitive(value):
 
 
 def find_us_regions(ds) -> list[Region]:
-    """PLACEHOLDER: return the ultrasound regions of a header-only dataset.
+    """Return the ultrasound regions of a header-only dataset.
 
-    Default: one Region per item of SequenceOfUltrasoundRegions (0018,6011), using
+    One Region per item of SequenceOfUltrasoundRegions (0018,6011), using
     RegionLocationMinX0/MinY0/MaxX1/MaxY1, RegionSpatialFormat and RegionDataType. Boxes are clipped
     to the image size; items with a missing or empty box are skipped. Returns [] when the sequence is
     absent (callers then fall back to the full frame).
