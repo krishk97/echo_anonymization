@@ -113,7 +113,7 @@ def test_max_num_frames_excludes_long_files(
 def test_one_record_per_region_and_image_bboxes(
     dicom_tree: DicomTree, make_cfg: MakeCfg
 ) -> None:
-    """Videos get one record per kept region; images get 2D/1D boxes.
+    """Videos get one record per kept region; images get 2D/1D region columns.
 
     Args:
         dicom_tree: The synthetic tree fixture.
@@ -152,9 +152,26 @@ def test_one_record_per_region_and_image_bboxes(
     assert noreg_vid.RegionSource == "full_frame"
     noreg_box = (noreg_vid.BBoxX0, noreg_vid.BBoxY0, noreg_vid.BBoxX1, noreg_vid.BBoxY1)
     assert noreg_box == (0, 0, 160, 120)
+    assert (img.RegionIndex2D, img.SpatialFormat2D, img.DataType2D) == (0, 1, 1)
+    assert (img.RegionIndex1D, img.SpatialFormat1D, img.DataType1D) == (1, 3, 3)
     a2_img = by_source(manifest, paths, "a2_img").iloc[0]
     assert (a2_img.BBox2DX1, a2_img.BBox2DY1) == (110, 100)
-    assert pd.isna(a2_img.BBox1DX0)
+    assert pd.isna(a2_img.BBox1DX0) and pd.isna(a2_img.RegionIndex1D)
+
+    # Each manifest holds only its own type's region columns.
+    secure = Path(cfg["paths"]["secure_dir"])
+    videos = read_parquet_dir(secure / "manifest" / "video")
+    images = read_parquet_dir(secure / "manifest" / "image")
+    assert (videos["ItemType"] == "video").all()
+    assert (images["ItemType"] == "image").all()
+    assert not {"BBox2DX0", "BBox1DX0", "PhysicalDeltaX2D"} & set(videos.columns)
+    assert not {"BBoxX0", "RegionIndex", "FPS", "PhysicalDeltaX"} & set(images.columns)
+    # Calibration tags are flat scalar columns per region; no list/dict columns.
+    assert (img.PhysicalDeltaX2D, img.PhysicalUnitsYDirection1D) == (0.05, 3)
+    assert (left.PhysicalDeltaY, left.PhysicalUnitsXDirection) == (0.05, 3)
+    assert pd.isna(noreg_vid.PhysicalDeltaX)  # full-frame fallback: no calibration
+    for t in (videos, images):
+        assert not t.map(lambda v: isinstance(v, list | dict)).any().any()
 
 
 def test_region_selection_units() -> None:
@@ -378,7 +395,7 @@ class Boom(Exception):
     """Simulated crash."""
 
 
-@pytest.mark.parametrize("crash_on", ["manifest", "status"])
+@pytest.mark.parametrize("crash_on", ["video", "image", "status"])
 def test_restart_after_crash(
     dicom_tree: DicomTree,
     make_cfg: MakeCfg,
@@ -426,9 +443,10 @@ def test_restart_after_crash(
         clean_manifest.set_index("SourcePath")["RecordID"].sort_index(),
     )
     secure = Path(cfg["paths"]["secure_dir"])
-    assert len(list((secure / "manifest").glob("*.parquet"))) == len(
-        list((secure / "status").glob("*.parquet"))
-    )
+    n_status = len(list((secure / "status").glob("*.parquet")))
+    for item_type in ("video", "image"):
+        parts = (secure / "manifest" / item_type).glob("*.parquet")
+        assert len(list(parts)) == n_status
 
 
 def test_multiprocessing_matches_serial(

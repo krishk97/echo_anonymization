@@ -7,8 +7,8 @@ paths:
   dicom_extension: dcm
   # SECURE area (contains PHI): anonymization_crosswalk.csv, manifest/, status/, logs. Keep access restricted.
   secure_dir: /path/to/secure
-  # Anonymized outputs: files/<AnonPatientID>/<AnonStudyID>/<name>.<png|avi>, results/, echo-record-list.parquet,
-  # echo-study-list.csv
+  # Anonymized outputs: files/<AnonPatientID>/<AnonStudyID>/<name>.<png|avi>, results/, echo-video-list.parquet,
+  # echo-image-list.parquet, echo-study-list.csv
   output_root: /path/to/anonymized
 
 # ---------------- Script 1: create_anonymization_plan.py (CPU) ----------------

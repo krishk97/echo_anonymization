@@ -4,12 +4,12 @@ Scans DICOM headers, filters to ultrasound, extends the anonymization crosswalk,
 finds ultrasound regions, and writes the item-level work manifest for Script 2.
 
 Restartable: files already listed in a status part are skipped; the crosswalk is
-only appended to. Per chunk the order is: crosswalk append (fsync) -> manifest part
--> status part. The status part is the commit marker; a manifest part without its
-status part is deleted on startup and redone.
+only appended to. Videos and images go to separate manifests (`manifest/video/`,
+`manifest/image/`). Per chunk the order is: crosswalk append (fsync) -> video and
+image manifest parts -> status part. The status part is the commit marker; a manifest
+part without its status part is deleted on startup and redone.
 """
 
-import json
 import multiprocessing as mp
 import re
 import time
@@ -24,6 +24,7 @@ from loguru import logger
 
 from src.anon_crosswalk import AnonCrosswalk
 from src.dicom_utils import (
+    REGION_DETAIL_TAGS,
     Region,
     cap_age,
     extract_header,
@@ -40,10 +41,19 @@ from src.io_utils import (
     setup_logging,
 )
 
-INT_COLUMNS = ["NumFrames", "RegionIndex", "SpatialFormat", "DataType", "DecodedBytes"]
-INT_COLUMNS += [
-    f"{p}{c}" for p in ("BBox", "BBox2D", "BBox1D") for c in ("X0", "Y0", "X1", "Y1")
+# Region column suffixes: "" for a video's region, "2D"/"1D" for an image's two regions
+REGION_SUFFIXES = ("", "2D", "1D")
+# Fixed dtypes, so a column that is all None in a chunk is not written as `object`.
+# Calibration tags are integers except PhysicalDeltaX/Y.
+FLOAT_TAGS = {"PhysicalDeltaX", "PhysicalDeltaY"}
+INT_COLUMNS = ["NumFrames", "DecodedBytes"] + [
+    c.format(s)
+    for s in REGION_SUFFIXES
+    for c in ("RegionIndex{}", "BBox{}X0", "BBox{}Y0", "BBox{}X1", "BBox{}Y1")
+    + ("SpatialFormat{}", "DataType{}")
+    + tuple(f"{t}{{}}" for t in REGION_DETAIL_TAGS if t not in FLOAT_TAGS)
 ]
+FLOAT_COLUMNS = [f"{t}{s}" for s in REGION_SUFFIXES for t in sorted(FLOAT_TAGS)]
 
 
 def find_files_by_extension(folder: str | Path, extension: str) -> list[Path]:
@@ -137,11 +147,31 @@ def record_id_for(stem: str, region_index: int | None, multi_region: bool) -> st
     return f"{stem}_r{region_index}" if multi_region else stem
 
 
-def _bbox_columns(prefix: str, region: Region | None) -> dict[str, int | None]:
-    """Returns the `<prefix>X0`..`<prefix>Y1` columns (all None if no region)."""
+def _region_columns(
+    suffix: str, region: Region | None
+) -> dict[str, int | float | None]:
+    """Returns one region's columns (all None if no region).
+
+    Args:
+        suffix: "" for a video's region, "2D" or "1D" for an image's regions.
+        region: The region, or None.
+
+    Returns:
+        `RegionIndex<suffix>`, `BBox<suffix>X0`..`BBox<suffix>Y1`,
+        `SpatialFormat<suffix>`, `DataType<suffix>` and one `<tag><suffix>`
+        column per `REGION_DETAIL_TAGS` calibration tag (None if missing).
+    """
+
+    def get(attr: str) -> int | None:
+        return getattr(region, attr) if region is not None else None
+
+    details = region.details if region is not None else {}
     return {
-        f"{prefix}{c.upper()}": (getattr(region, c) if region is not None else None)
-        for c in ("x0", "y0", "x1", "y1")
+        f"RegionIndex{suffix}": get("index"),
+        **{f"BBox{suffix}{c.upper()}": get(c) for c in ("x0", "y0", "x1", "y1")},
+        f"SpatialFormat{suffix}": get("spatial_format"),
+        f"DataType{suffix}": get("data_type"),
+        **{f"{t}{suffix}": details.get(t) for t in REGION_DETAIL_TAGS},
     }
 
 
@@ -160,7 +190,8 @@ def build_records(
         cfg: The `index` section of the config.
 
     Returns:
-        One record per video region, or one record for an image. Empty if a video
+        One record per video region, or one record for an image (the two have
+        different region columns). Empty if a video
         has no usable region, or an image has no 2D or 1D region (including an
         image without a region sequence).
     """
@@ -201,10 +232,6 @@ def build_records(
         "AnonStudyID": anon_study,
         "ItemType": "video" if is_video else "image",
         "SOPClass": header["detail"],
-        "NumFrames": header["num_frames"],
-        "FPS": header["fps"],
-        "RegionSource": region_source,
-        "RegionsJSON": json.dumps([r.to_dict() for r in regions]),
         "DecodedBytes": header["decoded_bytes"],
         "Oversize": header["decoded_bytes"] > cfg["max_decoded_gb"] * 1e9,
         "PatientAgeCapped": cap_age(header["patient_age"], cfg["age_cap_years"]),
@@ -224,23 +251,17 @@ def build_records(
         if is_video:
             rec.update(
                 {
-                    "RegionIndex": region.index,
-                    **_bbox_columns("BBox", region),
-                    "SpatialFormat": region.spatial_format,
-                    "DataType": region.data_type,
-                    **_bbox_columns("BBox2D", None),
-                    **_bbox_columns("BBox1D", None),
+                    "NumFrames": header["num_frames"],
+                    "FPS": header["fps"],
+                    "RegionSource": region_source,
+                    **_region_columns("", region),
                 }
             )
         else:
             rec.update(
                 {
-                    "RegionIndex": None,
-                    **_bbox_columns("BBox", None),
-                    "SpatialFormat": None,
-                    "DataType": None,
-                    **_bbox_columns("BBox2D", two_d),
-                    **_bbox_columns("BBox1D", one_d),
+                    **_region_columns("2D", two_d),
+                    **_region_columns("1D", one_d),
                 }
             )
         records.append(rec)
@@ -252,7 +273,7 @@ def process_chunk(
     crosswalk: AnonCrosswalk,
     registry: set[str],
     cfg: dict[str, Any],
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Extends the crosswalk, then builds manifest and status rows for one chunk.
 
     This is the single-writer step and runs in the main process only.
@@ -264,7 +285,7 @@ def process_chunk(
         cfg: The `index` section of the config.
 
     Returns:
-        (manifest frame, status frame).
+        (video manifest frame, image manifest frame, status frame).
     """
     included = [h for h in headers if h["status"] == "ok"]
     crosswalk.assign([h["crosswalk"] for h in included])
@@ -291,40 +312,53 @@ def process_chunk(
             }
         )
 
-    manifest = pd.DataFrame(manifest_rows)
-    for c in INT_COLUMNS:
-        if c in manifest:
-            manifest[c] = manifest[c].astype("Int64")
-    return manifest, pd.DataFrame(status_rows)
+    manifests = []
+    for item_type in ("video", "image"):
+        manifest = pd.DataFrame(
+            [r for r in manifest_rows if r["ItemType"] == item_type]
+        )
+        for cols, dtype in ((INT_COLUMNS, "Int64"), (FLOAT_COLUMNS, "float64")):
+            for c in cols:
+                if c in manifest:
+                    manifest[c] = manifest[c].astype(dtype)
+        manifests.append(manifest)
+    return manifests[0], manifests[1], pd.DataFrame(status_rows)
 
 
-def load_state(manifest_dir: Path, status_dir: Path) -> tuple[set[str], set[str]]:
+def load_state(
+    manifest_dirs: list[Path], status_dir: Path
+) -> tuple[set[str], set[str]]:
     """Cleans up after a crash and loads what earlier runs committed.
 
     Removes leftover `*.tmp` files and manifest parts without a status part.
 
     Args:
-        manifest_dir: Directory of manifest parts.
+        manifest_dirs: Directories of manifest parts (video and image).
         status_dir: Directory of status parts.
 
     Returns:
-        (done source paths, registry of assigned stems).
+        (done source paths, registry of assigned stems across all manifests).
     """
-    for d in (manifest_dir, status_dir):
+    for d in (*manifest_dirs, status_dir):
         d.mkdir(parents=True, exist_ok=True)
         for tmp in d.glob("*.tmp"):
             tmp.unlink()
     committed = {p.name for p in status_dir.glob("*.parquet")}
-    for part in manifest_dir.glob("*.parquet"):
-        if part.name not in committed:
-            logger.warning(
-                "Removing uncommitted manifest part {} (no status part)", part.name
-            )
-            part.unlink()
+    registry = set()
+    for manifest_dir in manifest_dirs:
+        for part in manifest_dir.glob("*.parquet"):
+            if part.name not in committed:
+                logger.warning(
+                    "Removing uncommitted {} manifest part {} (no status part)",
+                    manifest_dir.name,
+                    part.name,
+                )
+                part.unlink()
+        manifest = read_parquet_dir(manifest_dir)
+        if len(manifest):
+            registry |= {stem_of(i) for i in manifest["RecordID"]}
     status = read_parquet_dir(status_dir)
-    manifest = read_parquet_dir(manifest_dir)
     done = set(status["SourcePath"]) if len(status) else set()
-    registry = {stem_of(i) for i in manifest["RecordID"]} if len(manifest) else set()
     return done, registry
 
 
@@ -340,12 +374,13 @@ def main(cfg: dict[str, Any]) -> Counter:
     paths, icfg = cfg["paths"], cfg["index"]
     quiet_pydicom()
     secure = Path(paths["secure_dir"])
-    manifest_dir, status_dir = secure / "manifest", secure / "status"
+    video_dir, image_dir = secure / "manifest" / "video", secure / "manifest" / "image"
+    status_dir = secure / "status"
 
     crosswalk = AnonCrosswalk(
         secure / "anonymization_crosswalk.csv", tuple(icfg["date_offset_days"])
     )
-    done, registry = load_state(manifest_dir, status_dir)
+    done, registry = load_state([video_dir, image_dir], status_dir)
 
     logger.info("Discovering files...")
     files = sorted(
@@ -386,9 +421,10 @@ def main(cfg: dict[str, Any]) -> Counter:
                 if pool
                 else [worker(f) for f in chunk]
             )
-            manifest, status = process_chunk(headers, crosswalk, registry, icfg)
+            videos, images, status = process_chunk(headers, crosswalk, registry, icfg)
             name = f"chunk-{first_seq + k:06d}.parquet"
-            atomic_write_parquet(manifest, manifest_dir / name)
+            atomic_write_parquet(videos, video_dir / name)
+            atomic_write_parquet(images, image_dir / name)
             # Commit marker, written last.
             atomic_write_parquet(status, status_dir / name)
 
@@ -396,13 +432,14 @@ def main(cfg: dict[str, Any]) -> Counter:
             excluded_sop.update(
                 status.loc[status["Status"] == "excluded_sop_class", "Detail"]
             )
-            n_records += len(manifest)
+            n_records += len(videos) + len(images)
             logger.info(
-                "Chunk {}/{}: {} files -> {} records in {:.1f}s | {}",
+                "Chunk {}/{}: {} files -> {} video + {} image records in {:.1f}s | {}",
                 k + 1,
                 len(chunks),
                 len(chunk),
-                len(manifest),
+                len(videos),
+                len(images),
                 time.time() - t0,
                 dict(Counter(status["Status"])),
             )

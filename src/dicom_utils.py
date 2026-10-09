@@ -129,19 +129,6 @@ class Region:
             and self.y1 >= other.y1
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        """Returns the region as a flat dict, with `details` merged in."""
-        return {
-            "index": self.index,
-            "x0": self.x0,
-            "y0": self.y0,
-            "x1": self.x1,
-            "y1": self.y1,
-            "spatial_format": self.spatial_format,
-            "data_type": self.data_type,
-            **self.details,
-        }
-
 
 def _int_or_none(value: Any) -> int | None:
     """Converts a value to int, or None if missing or unconvertible."""
