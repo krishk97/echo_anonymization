@@ -5,7 +5,7 @@
 Two-stage pipeline that turns a large collection of echocardiogram DICOMs into:
 
 1. a **study-level anonymization crosswalk** (`anonymization_crosswalk.csv`, append-only),
-2. **anonymized media**: `file/<AnonPatientID>/<AnonStudyID>/<name>.<png|avi>`,
+2. **anonymized media**: `files/<AnonPatientID>/<AnonStudyID>/<name>.<png|avi>`,
 3. a **record list** (`echo-record-list.parquet`): one row per media record with anonymized metadata and the outputs of two
    view classifiers,
 4. a **study list** (`echo-study-list.csv`): one row per study.
@@ -101,9 +101,10 @@ Everything is set in **`configs/config.yaml`**. Usually you only edit `paths:`.
 |---|---|
 | `paths.dicom_root` | Raw DICOM root (searched recursively for `*.<dicom_extension>`) |
 | `paths.secure_dir` | **Contains PHI**: `anonymization_crosswalk.csv`, `manifest/`, `status/`, Script 1 logs. Restrict access. |
-| `paths.output_root` | Anonymized outputs: `file/`, `results/`, `echo-record-list.parquet`, `echo-study-list.csv`, Script 2 logs |
+| `paths.output_root` | Anonymized outputs: `files/`, `results/`, `echo-record-list.parquet`, `echo-study-list.csv`, Script 2 logs |
 | `index.num_workers`, `index.chunk_size` | Header-reading pool size and files per chunk |
 | `index.sop_classes` | SOP classes to keep (default: the two ultrasound storage classes) |
+| `index.max_num_frames` | Files with more frames than this are excluded (`excluded_too_many_frames`); `null` = no limit |
 | `index.max_decoded_gb` | Files whose decoded RGB size exceeds this are flagged `oversize` and skipped by Script 2 |
 | `index.date_offset_days` | Inclusive range for the per-patient random date shift (default +99 to +100 years) |
 | `index.age_cap_years` | Ages at or above this become `"90+"` |
@@ -189,20 +190,21 @@ sbatch slurm/02_run_preprocess_only.sbatch       [configs/config.yaml] [--retry-
   - `excluded_no_pixel_data`
   - `excluded_missing_patient_id`
   - `excluded_missing_study_uid`
+  - `excluded_too_many_frames`: more frames than `index.max_num_frames`
   - `excluded_no_video_region`: a video with no 2D tissue/color region
   - `error`, where `Detail` holds the exception type only
 - **`logs/`**: counts and exception types only.
 
 ### Anonymized area (`paths.output_root`)
 
-- **`file/<AnonPatientID>/<AnonStudyID>/<name>.png|.avi`**: preprocessed, PHI-masked media.
+- **`files/<AnonPatientID>/<AnonStudyID>/<name>.png|.avi`**: preprocessed, PHI-masked media.
 - **`results/rank=<r>/part-NNNNNN.parquet`**: raw result rows, append-only. Each row has `RecordID`, `OutputPath`, `Status`, `ErrorType`, the view-classification columns (see below), `PipelineVersion` and `Timestamp`.
   - `Status` is one of `success`, `preprocessed` (media saved by `run_echo_preprocessing_and_anonymization.py`, not classified), `skipped_oversize`, `skipped_undecodable` or `error`.
   - View classification (on `success` rows only, see [View classification](#view-classification)):
     - `EchoFine_View=<view>` / `EchoPrime_View=<view>`: the score for each view.
     - `View_EchoFine` / `View_EchoPrime`: the top-scoring view.
     - `ViewScore_EchoFine` / `ViewScore_EchoPrime`: that view's score.
-- **`echo-record-list.parquet`**: the final table, written by `merge`. It keeps the latest row per `RecordID`, joined with the manifest through an explicit keep-list. `AnonPatientID` / `AnonStudyID` are renamed to `PatientID` / `StudyID` here, since the final outputs hold no real IDs, and `OutputPath` is renamed to `FilePath` (relative to `file/`).
+- **`echo-record-list.parquet`**: the final table, written by `merge`. It keeps the latest row per `RecordID`, joined with the manifest through an explicit keep-list. `AnonPatientID` / `AnonStudyID` are renamed to `PatientID` / `StudyID` here, since the final outputs hold no real IDs, and `OutputPath` is renamed to `FilePath` (relative to `files/`).
 - **`echo-study-list.csv`**: written by `merge`, one row per study in the record list, with columns `PatientID` (the anonymized `AnonPatientID`), `StudyID` (the anonymized `AnonStudyID`) and `StudyDateTime` (the shifted StudyDate plus the StudyTime; date only if StudyTime is missing).
 
 ## Output naming
@@ -235,6 +237,7 @@ Both scripts can be killed at any point and rerun with the same command.
 - A row is written only after both models have run and the media file has been saved (temp file + rename).
 - A crash loses at most the unflushed rows. Those items are redone, and their media files are overwritten atomically.
 - `--retry-errors` re-queues items whose latest status is `error`. `merge` keeps the latest row per `RecordID`.
+- `merge` deletes `results/` once the merge is complete, meaning every manifest record has a result, none is `error`, and no media file is missing. Otherwise it keeps `results/` so that `run` can resume. After `results/` is deleted, a later `run` treats every record as pending again.
 
 ## Placeholders to fill in
 

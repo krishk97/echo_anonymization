@@ -17,6 +17,7 @@ Only the preprocessed media is written to disk.
 """
 import multiprocessing as mp
 import os
+import shutil
 import time
 from argparse import ArgumentParser
 from collections import Counter
@@ -260,7 +261,7 @@ def run_rank(rank: int, files: list[tuple[str, list[dict]]], cfg: dict, models: 
     gets status `preprocessed`."""
     pcfg = cfg["preprocess"]
     out_root = Path(cfg["paths"]["output_root"])
-    media_root = out_root / "file"
+    media_root = out_root / "files"
     writer = ResultWriter(out_root / "results" / f"rank={rank}", pcfg["flush_every"], pcfg["pipeline_version"])
 
     loader_kwargs = dict(batch_size=None, collate_fn=_identity, num_workers=pcfg["num_workers"],
@@ -417,7 +418,8 @@ def study_list(table: pd.DataFrame, crosswalk_path: Path) -> pd.DataFrame:
 
 def merge(cfg: dict) -> pd.DataFrame:
     """Combine result parts into the final table: latest row per RecordID, joined with the manifest's
-    anonymized metadata through an explicit keep-list (no source paths or real identifiers)."""
+    anonymized metadata through an explicit keep-list (no source paths or real identifiers).
+    If every manifest record has a non-error result with its media on disk, `results/` is deleted."""
     out_root = Path(cfg["paths"]["output_root"])
     results = read_parquet_dir(out_root / "results")
     manifest = read_parquet_dir(Path(cfg["paths"]["secure_dir"]) / "manifest")
@@ -441,12 +443,19 @@ def merge(cfg: dict) -> pd.DataFrame:
     os.replace(tmp, out_root / "echo-study-list.csv")
 
     success = table["Status"].isin(["success", "preprocessed"])
-    missing = sum(not (out_root / "file" / p).exists() for p in table.loc[success, "FilePath"])
+    missing = sum(not (out_root / "files" / p).exists() for p in table.loc[success, "FilePath"])
+    errors = int((table["Status"] == "error").sum())
+    without_result = int((~manifest["RecordID"].isin(table["RecordID"])).sum())
     logger.info("Final table: {} records -> {}", len(table), out_root / "echo-record-list.parquet")
     logger.info("Study list: {} studies -> {}", len(studies), out_root / "echo-study-list.csv")
     logger.info("QA counts by status: {}", table["Status"].value_counts().to_dict())
     logger.info("QA success records with missing media file: {}", missing)
-    logger.info("QA manifest records without a result yet: {}", int((~manifest["RecordID"].isin(table["RecordID"])).sum()))
+    logger.info("QA manifest records without a result yet: {}", without_result)
+    if missing or errors or without_result:
+        logger.info("Merge incomplete: keeping {} so runs can resume", out_root / "results")
+    else:
+        shutil.rmtree(out_root / "results")
+        logger.info("Merge complete: deleted {}", out_root / "results")
     return table
 
 

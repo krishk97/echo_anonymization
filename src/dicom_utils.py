@@ -283,6 +283,8 @@ def extract_header(path, cfg: dict) -> dict:
 
         rows, cols = int(ds.Rows), int(ds.Columns)
         num_frames = int(ds.get("NumberOfFrames") or 1)
+        if cfg["max_num_frames"] is not None and num_frames > cfg["max_num_frames"]:
+            return {**out, "status": "excluded_too_many_frames", "detail": sop_name}
         bytes_per_sample = (int(ds.get("BitsAllocated") or 8) + 7) // 8
         return {
             **out,
