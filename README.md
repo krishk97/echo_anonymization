@@ -240,8 +240,6 @@ Both scripts can be killed at any point and rerun with the same command.
 
 | Where | What |
 |---|---|
-| `run_echo_preprocessing_and_anonymization_with_classifier.py: AnonymizedEchoDataset.preprocess_echo_video` | Burned-in PHI removal for a video region. The default crops to the box and masks stationary pixels (`mask_outside_ultrasound_video`). |
-| `run_echo_preprocessing_and_anonymization_with_classifier.py: AnonymizedEchoDataset.preprocess_echo_image` | Burned-in PHI removal for an image. The default zeroes everything outside the 2D and 1D boxes. |
 | `configs/config.yaml: models` | Weight paths for EchoFine (`.h5`) and EchoPrime (`.pt`) |
 
 ## Code layout
