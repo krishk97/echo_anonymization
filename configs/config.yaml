@@ -61,8 +61,12 @@ preprocess:
   # Only for run_echo_preprocessing_and_anonymization.py (no GPU, no view classifiers): number of CPU processes.
   # Each one also starts `num_workers` DataLoader workers.
   num_cpu_procs: 8
-  # DataLoader settings (per GPU process)
-  num_workers: 4
+  # DataLoader settings (per GPU process). Workers decode, preprocess AND save the media
+  # (only the 224x224 model inputs go to the GPU), so num_workers is the main throughput
+  # knob: roughly CPU cores / num_gpus. Files are dealt largest first, so all workers
+  # start on the biggest clips at once; peak RAM is roughly
+  # num_gpus * num_workers * (prefetch_factor + 1) * ~3 * decoded file size (<= max_decoded_gb).
+  num_workers: 16
   prefetch_factor: 2
   # Frames per model call, so long videos cannot exhaust VRAM.
   frame_chunk: 64

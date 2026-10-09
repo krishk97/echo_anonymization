@@ -444,7 +444,7 @@ def main(cfg: dict[str, Any]) -> Counter:
         for p in find_files_by_extension(
             Path(paths["dicom_root"]).resolve(),
             paths["dicom_extension"],
-            icfg["scan_threads"],
+            icfg.get("scan_threads", 1),
         )
     )
     pending = [f for f in files if f not in done]

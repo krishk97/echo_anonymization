@@ -151,27 +151,35 @@ def test_image_masked_outside_regions(indexed: Indexed) -> None:
     assert img[keep].max() > 0
 
 
-def test_image_echoprime_input_is_2d_box(indexed: Indexed) -> None:
+def test_image_echoprime_input_is_2d_box(indexed: Indexed, tmp_path: Path) -> None:
     """EchoPrime gets an image's BBox2D crop, or the whole image without a 2D box.
+
+    The saved PNG (lossless) is the masked image the input is built from.
 
     Args:
         indexed: The indexed tree fixture.
+        tmp_path: pytest's per-test temp directory, used as the media root.
     """
     cfg, paths = indexed
     shards = script2.shard_files(script2.pending_records(cfg, False), 1)
     src, recs = next(f for f in shards[0] if f[0] == paths["a1_s1_img"])
     no_2d = {**recs[0], **{f"BBox2D{c}": None for c in ("X0", "Y0", "X1", "Y1")}}
-    dataset = script2.AnonymizedEchoDataset([(src, recs), (src, [no_2d])])
+    dataset = script2.AnonymizedEchoDataset(
+        [(src, recs), (src, [no_2d])], tmp_path, "FFV1"
+    )
+    saved = tmp_path / recs[0]["OutputPath"]
 
     out = dataset[0]["records"][0]
+    assert "media" not in out
+    media = np.asarray(Image.open(saved))
     x0, y0, x1, y1 = (recs[0][f"BBox2D{c}"] for c in ("X0", "Y0", "X1", "Y1"))
-    expected = script2.resize_frames(out["media"][np.newaxis, y0:y1, x0:x1])
+    expected = script2.resize_frames(media[np.newaxis, y0:y1, x0:x1])
     np.testing.assert_array_equal(out["echoprime_in"], expected)
-    full = script2.resize_frames(out["media"][np.newaxis])
+    full = script2.resize_frames(media[np.newaxis])
     assert not np.array_equal(out["echoprime_in"], full)
 
     out = dataset[1]["records"][0]
-    expected = script2.resize_frames(out["media"][np.newaxis])
+    expected = script2.resize_frames(np.asarray(Image.open(saved))[np.newaxis])
     np.testing.assert_array_equal(out["echoprime_in"], expected)
 
 
@@ -270,7 +278,12 @@ def test_restart_after_crash(indexed: Indexed, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(script2, "save_media", crashing_save)
     with pytest.raises(Crash):
         run_all(cfg, stub_models())
-    assert len(results(cfg)) == 3  # rows only for fully finished items
+    # Media is saved per file in the loader, before any of that file's rows, so
+    # rows exist only for files whose saves all finished.
+    partial = results(cfg)
+    assert 0 < len(partial) <= 3
+    media = Path(cfg["paths"]["output_root"]) / "files"
+    assert all((media / p).exists() for p in partial["OutputPath"])
 
     monkeypatch.setattr(script2, "save_media", real_save)
     run_all(cfg, stub_models())
@@ -300,6 +313,27 @@ def test_retry_errors(indexed: Indexed) -> None:
     assert len(calls) == 1
     latest = script2.latest_results(results(cfg))
     assert (latest["Status"] == "success").all() and len(latest) == len(first)
+
+
+def test_echofine_failure_keeps_saved_media(indexed: Indexed) -> None:
+    """If EchoFine fails, rows are `error` but the media was already saved.
+
+    Args:
+        indexed: The indexed tree fixture.
+    """
+    cfg, _ = indexed
+    models = stub_models()
+
+    def failing_echofine(x: np.ndarray) -> np.ndarray:
+        raise RuntimeError("stub failure")
+
+    models.echofine = failing_echofine
+    run_all(cfg, models)
+    res = results(cfg)
+    assert (res["Status"] == "error").all()
+    assert (res["ErrorType"] == "RuntimeError").all()
+    media = Path(cfg["paths"]["output_root"]) / "files"
+    assert all((media / p).exists() for p in res["OutputPath"])
 
 
 def test_summarize_score() -> None:

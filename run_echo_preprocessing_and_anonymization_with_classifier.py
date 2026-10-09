@@ -9,9 +9,10 @@ Subcommands:
 Restartable: the done set is every RecordID already in a result part (any status);
 `--retry-errors` re-queues records whose latest status is `error`. A result row is
 written only after both models have run and the media file has been saved
-atomically. Records saved by `run_echo_preprocessing_and_anonymization.py` (status
-`preprocessed`, no view columns) are not done here: `run` redoes them with
-classification.
+atomically. The DataLoader workers decode, preprocess and save the media; only the
+small model inputs are sent to the GPU process. Records saved by
+`run_echo_preprocessing_and_anonymization.py` (status `preprocessed`, no view
+columns) are not done here: `run` redoes them with classification.
 
 Model inputs (per source file / record):
   - EchoFine:  the full, unmasked frames (as in the old pipeline), run once per
@@ -126,27 +127,39 @@ def resize_frames(frames: np.ndarray) -> np.ndarray:
 class AnonymizedEchoDataset(Dataset):
     """Dataset of source files, each with all of its pending records.
 
-    One item is one source file, so a file is decoded only once.
+    One item is one source file, so a file is decoded only once. Each record's
+    preprocessed media is saved here (in the worker), so only the model inputs
+    go back to the GPU process.
 
     Attributes:
         files: (source path, pending manifest records) per source file.
+        media_root: Directory the records' OutputPaths are relative to.
+        codec: FourCC codec for videos.
     """
 
-    def __init__(self, files: list[tuple[str, list[dict[str, Any]]]]) -> None:
+    def __init__(
+        self,
+        files: list[tuple[str, list[dict[str, Any]]]],
+        media_root: Path,
+        codec: str,
+    ) -> None:
         """Initializes the dataset.
 
         Args:
             files: (source path, pending manifest records) per source file, as
                 returned by `shard_files`.
+            media_root: Directory the records' OutputPaths are relative to.
+            codec: FourCC codec for videos.
         """
         self.files = files
+        self.media_root, self.codec = Path(media_root), codec
 
     def __len__(self) -> int:
         """Returns the number of source files."""
         return len(self.files)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        """Decodes and preprocesses one source file. Never raises.
+        """Decodes, preprocesses and saves one source file. Never raises.
 
         Args:
             index: Position in `files`.
@@ -154,9 +167,8 @@ class AnonymizedEchoDataset(Dataset):
         Returns:
             {"echofine_in": (N, 224, 224, 3) array or None, "records": [...]},
             where each record dict has RecordID/OutputPath/ItemType/FPS/Status/
-            ErrorType and, when Status is "ok", the preprocessed `media` to save
-            and the `echoprime_in` model input. Failures become skip/error
-            records.
+            ErrorType and, when Status is "ok" (media saved), the `echoprime_in`
+            model input. Failures become skip/error records.
         """
         source_path, records = self.files[index]
         base = [
@@ -199,12 +211,18 @@ class AnonymizedEchoDataset(Dataset):
                         x0, y0, x1, y1 = bbox_2d
                         prime_src = media[y0:y1, x0:x1]
                     echoprime_in = resize_frames(prime_src[np.newaxis])
+                save_media(
+                    self.media_root / rec["OutputPath"],
+                    media,
+                    rec["ItemType"],
+                    rec["FPS"],
+                    self.codec,
+                )
                 out.append(
                     {
                         **b,
                         "Status": "ok",
                         "ErrorType": None,
-                        "media": media,
                         "echoprime_in": echoprime_in,
                     }
                 )
@@ -532,7 +550,9 @@ def run_rank(
             multiprocessing_context="spawn",
             worker_init_fn=_init_worker,
         )
-    loader = DataLoader(AnonymizedEchoDataset(files), **loader_kwargs)
+    loader = DataLoader(
+        AnonymizedEchoDataset(files, media_root, pcfg["video_codec"]), **loader_kwargs
+    )
 
     counts, t0, gpu = Counter(), time.time(), gpu_handle()
     for n_files, item in enumerate(loader, start=1):
@@ -553,17 +573,7 @@ def run_rank(
             row = {k: rec[k] for k in ("RecordID", "OutputPath", "Status", "ErrorType")}
             if rec["Status"] == "ok":
                 if models is None:
-                    try:
-                        save_media(
-                            media_root / rec["OutputPath"],
-                            rec["media"],
-                            rec["ItemType"],
-                            rec["FPS"],
-                            pcfg["video_codec"],
-                        )
-                        row.update(Status="preprocessed")
-                    except Exception as e:
-                        row.update(Status="error", ErrorType=type(e).__name__)
+                    row.update(Status="preprocessed")
                 elif echofine is None:
                     row.update(Status="error", ErrorType=echofine_error)
                 else:
@@ -572,13 +582,6 @@ def run_rank(
                             "EchoPrime",
                             models.echoprime(rec["echoprime_in"]),
                             models.echoprime_views,
-                        )
-                        save_media(
-                            media_root / rec["OutputPath"],
-                            rec["media"],
-                            rec["ItemType"],
-                            rec["FPS"],
-                            pcfg["video_codec"],
                         )
                         row.update(Status="success", **echofine, **echoprime)
                     except Exception as e:
@@ -711,7 +714,9 @@ def shard_files(
     recs = fields.astype(object).where(fields.notna(), None).to_dict("records")
     by_src: dict[str, list[dict[str, Any]]] = defaultdict(list)
     sizes: dict[str, int] = {}
-    for src, size, rec in zip(pending["SourcePath"], pending["DecodedBytes"], recs):
+    for src, size, rec in zip(
+        pending["SourcePath"], pending["DecodedBytes"], recs, strict=True
+    ):
         by_src[src].append(rec)
         sizes.setdefault(src, int(size))
     order = sorted(by_src, key=lambda s: (-sizes[s], s))
