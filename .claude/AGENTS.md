@@ -49,8 +49,11 @@ src/image_utils.py                                           (pre-existing, user
 src/io_utils.py                                              load_config, atomic_write_parquet (tmp + fsync + os.replace), read_parquet_dir, setup_logging (Loguru sinks)
 src/view_classifier/                                         (pre-existing, user's) echofine.py (imports TF at module level), echoprime.py
 configs/config.yaml                                          the only config
-scripts/*.sh                                                 uv run wrappers for the stages, incl. run_preprocess_only.sh (gitignored)
-slurm/                                                       empty, gitignored
+scripts/*.sh                                                 uv run wrappers for the stages, incl. run_preprocess_only.sh
+slurm/                                                       sbatch examples (in README "On a Slurm cluster"): 01_create_anonymization_plan, 02_run_with_classifier
+                                                             (GPU run + merge), 02_run_preprocess_only (CPU + merge), submit_pipeline.sh
+                                                             (chains 01 -> 02 GPU via afterok). Submit from repo root (cd $SLURM_SUBMIT_DIR);
+                                                             stdout goes to slurm/logs/. --gres/--cpus-per-task must match config.yaml by hand.
 ```
 
 ### Internal-only (local, not part of the repo)
@@ -141,7 +144,7 @@ Keep these signatures stable:
 - Use the scratchpad for synthetic end-to-end runs (internal tooling only, see above). `tests/synthetic.py: build_tree(root)` writes a standard fake dataset. It includes multi-region clips, overlapping InstanceNumbers, a missing InstanceNumber, non-US, no-pixel and missing-key files, a corrupt file, and fake "PHI" strings (`synthetic.FAKE_PHI`) for leak tests.
 - Script 2 can be exercised on CPU by calling `pending_records` → `shard_files` → `run_rank(rank, files, cfg, models)` with a stub `Models(echofine, echoprime, views, views)`. Raise a `BaseException` subclass to simulate a crash, since `Exception` is caught per record.
 - This development node has **no GPU driver**. Real model loading and inference have never been run.
-- `.gitignore` ignores `tests/`, `scripts/`, `slurm/`, `.claude/` and `.vscode/`. Those directories won't be committed.
+- `.gitignore` ignores `tests/`, `.claude/` and `.vscode/`. Those directories won't be committed.
 
 ## Current state and known issues (as of 2026-10-08)
 
