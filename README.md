@@ -17,7 +17,8 @@ Two-stage pipeline that turns a large collection of echocardiogram DICOMs into:
 | `run_echo_preprocessing_and_anonymization.py` | CPU | Same as `run`, but without the view classifiers: decodes, crops/masks, saves media, writes result parts. For when no GPU is available. |
 | `run_echo_preprocessing_and_anonymization_with_classifier.py merge` | CPU | Combines result parts into the final anonymized table and prints QA counts |
 
-Splitting the work this way lets you QA the anonymization before spending GPU time, and rerun Script 2 (new models or transforms) without touching the anonymization.
+Splitting the work this way lets you QA the anonymization before spending GPU time, and rerun Script 2 (new models or transforms) without touching the anonymization: bump `preprocess.pipeline_version`
+and every record is processed again.
 
 ### Metadata anonymization
 
@@ -30,12 +31,16 @@ can identify a patient stays in the secure area (`paths.secure_dir`); only de-id
 - **Dates.** Each patient gets one random offset of +99 to +100 years (`index.date_offset_days`), reused for all of their
   studies, so the intervals between studies are preserved. The dates in `index.date_fields` are copied only after shifting,
   as `<Keyword>Shifted`.
-- **Age.** Ages at or above `index.age_cap_years` (default 90) become `"90+"` (`PatientAgeCapped`).
+- **Age.** Ages at or above `index.age_cap_years` (default 90) become `"<age_cap_years>+"`, e.g. `"90+"`
+  (`PatientAgeCapped`).
 - **Other fields.** Only the header fields in `index.metadata_allowlist` are copied. Names, free text, institutions and
   private tags are never copied.
 - **Final tables.** `merge` builds the record and study lists through an explicit keep-list, so source paths and crosswalk
   fields never reach them.
-- **Logs** record counts and exception types only, never tag values or file paths.
+- **Logs** record counts and exception types only, never tag values or source DICOM paths. Paths under
+  `paths.output_root` (e.g. where the final tables were written) can appear. pydicom's own log messages and warnings
+  are silenced in every process that reads DICOMs. An unhandled crash still prints a Python traceback to stderr (and
+  so to the Slurm job output).
 
 ### Video and image anonymization
 
@@ -48,17 +53,31 @@ version of each file is ever written to disk.
   region whose box lies fully inside another kept region is dropped (e.g. a color box inside the sector).
   - No `SequenceOfUltrasoundRegions` → one full-frame record.
   - No qualifying region → excluded (`excluded_no_video_region`).
-- **Images:** one record per file. `BBox2D*` is the largest 2D region and `BBox1D*` the largest M-mode or spectral region.
-  Either may be empty. All regions are kept in `RegionsJSON`. With no `SequenceOfUltrasoundRegions`, `BBox2D*` is the
-  full frame.
+- **Images:** one record per file, holding at most two boxes. `BBox2D*` is the largest 2D region with
+  `RegionDataType` = tissue, color flow or unknown (the same rule as videos), and `BBox1D*` the largest M-mode or spectral
+  region (ties go to the lower region index). Either may be empty. If an image has several 2D
+  or several 1D regions, only the largest of each kind is kept for masking; the others (e.g. the second panel of a
+  side-by-side layout) are masked out. All regions are still listed in `RegionsJSON`.
+  - No `SequenceOfUltrasoundRegions` → excluded (`excluded_no_image_region`), since nothing would say what to keep.
+  - Neither box (e.g. only ECG or graphics regions) → excluded (`excluded_no_image_region`).
 
-**Masking (Script 2).**
+**Masking (Script 2).** Masked pixels are set to 0 (black).
 
-- **Videos** are cropped to the region box. Then every pixel that does not change across frames (text, labels, the ECG
-  trace) is zeroed, keeping only the moving ultrasound sector, and the clip is cropped to that sector. The motion mask is
-  adapted from [EchoPrime](https://github.com/echonet/EchoPrime/blob/main/video_utils.py) (`mask_outside_ultrasound_video`).
-- **Images** have no motion to use, so instead we keep the full frame and mask everything outside region boxes that correspond to 
-2D, M-Mode, or Spectial spatial formats. An image with neither box is saved fully black.
+- **Videos** (one output clip per region record):
+  1. Crop the clip to the region box. Everything outside the box is dropped.
+  2. Build one mask for the whole clip from pixel motion: a pixel is kept if it is non-black on average and varies over
+     time. The variation map is eroded first, so small changes such as the ECG trace or updating heart-rate text don't
+     count as motion. If several separate areas remain, the largest is taken as the ultrasound sector and filled out to
+     its convex hull.
+  3. Zero every pixel outside the sector in every frame. This removes static overlays (names, dates, labels, the ECG
+     trace).
+  4. Crop the clip to the sector's bounding box.
+
+  The motion mask is adapted from
+  [EchoPrime](https://github.com/echonet/EchoPrime/blob/main/video_utils.py) (`mask_outside_ultrasound_video`).
+- **Images** have no motion to use, so the boxes alone define what is kept. The output keeps the full frame size, and
+  every pixel outside `BBox2D ∪ BBox1D` is zeroed. Pixels inside the boxes are kept as they are, so any text drawn
+  inside a box is not removed.
 
 <!-- TODO: replace with an example of a masked video (e.g. a GIF of original vs. anonymized). -->
 ![Video masking example: original (left) and anonymized (right)](docs/figures/video_masking_example.gif)
@@ -76,8 +95,8 @@ Script 2 labels each record with its echocardiographic view using two classifier
 
 | Model | Framework | Views | Input | Paper |
 |---|---|---|---|---|
-| EchoFine | TF/Keras | 47 | The **full, unmasked frames**, resized to 224×224. It runs once per file, and all region records of that file share the result. | [EchoFine paper](TODO-link-to-paper) |
-| EchoPrime | PyTorch | 11 | The record's masked media, resized to 224×224 | [EchoPrime paper](TODO-link-to-paper) |
+| EchoFine | TF/Keras | 47 | The **full, unmasked frames**, center-cropped to a square and resized to 224×224. It runs once per file, and all region records of that file share the result. | [EchoFine paper](TODO-link-to-paper) |
+| EchoPrime | PyTorch | 11 | The record's masked media, center-cropped to a square and resized to 224×224 | [EchoPrime paper](TODO-link-to-paper) |
 
 Each model's per-frame probabilities are reduced to one score per view, `score = mean / (1 + std)` over frames, so views
 that are confident and consistent across the clip score highest. The top-scoring view is stored as the record's view (see
@@ -99,24 +118,26 @@ Everything is set in **`configs/config.yaml`**. Usually you only edit `paths:`.
 
 | Key | Meaning |
 |---|---|
-| `paths.dicom_root` | Raw DICOM root (searched recursively for `*.<dicom_extension>`) |
+| `paths.dicom_root` | Raw DICOM root (searched recursively) |
+| `paths.dicom_extension` | Extension of the files to pick up (default `dcm`, case-insensitive) |
 | `paths.secure_dir` | **Contains PHI**: `anonymization_crosswalk.csv`, `manifest/`, `status/`, Script 1 logs. Restrict access. |
 | `paths.output_root` | Anonymized outputs: `files/`, `results/`, `echo-record-list.parquet`, `echo-study-list.csv`, Script 2 logs |
 | `index.num_workers`, `index.chunk_size` | Header-reading pool size and files per chunk |
 | `index.sop_classes` | SOP classes to keep (default: the two ultrasound storage classes) |
 | `index.max_num_frames` | Files with more frames than this are excluded (`excluded_too_many_frames`); `null` = no limit |
-| `index.max_decoded_gb` | Files whose decoded RGB size exceeds this are flagged `oversize` and skipped by Script 2 |
+| `index.max_decoded_gb` | Files whose decoded RGB size exceeds this are flagged `Oversize` and skipped by Script 2 (`skipped_oversize`) |
 | `index.date_offset_days` | Inclusive range for the per-patient random date shift (default +99 to +100 years) |
-| `index.age_cap_years` | Ages at or above this become `"90+"` |
-| `index.date_fields` | Dates copied after shifting, as `<Keyword>Shifted` |
+| `index.age_cap_years` | Ages at or above this become `"<age_cap_years>+"` |
+| `index.default_fps` | Frame rate used when a video has no `CineRate`, `FrameTime` or `FrameTimeVector` |
+| `index.date_fields` | Dates copied after shifting, as `<Keyword>Shifted`. Keep `StudyDate` in it: the study list's `StudyDateTime` is built from `StudyDateShifted` and is empty without it. |
 | `index.metadata_allowlist` | **The only header fields copied.** Never add free text, names, institutions or private tags. |
 | `preprocess.num_gpus` | One process per GPU. Uses the first N GPUs visible to the job (respects `CUDA_VISIBLE_DEVICES`). |
 | `preprocess.num_cpu_procs` | Number of processes for `run_echo_preprocessing_and_anonymization.py` (each also starts `num_workers` DataLoader workers) |
-| `preprocess.num_workers`, `prefetch_factor` | DataLoader settings per GPU process |
+| `preprocess.num_workers`, `prefetch_factor` | DataLoader settings per GPU (or CPU) process |
 | `preprocess.frame_chunk` | Frames per model call, so long clips can't exhaust VRAM |
 | `preprocess.flush_every` | Result rows per part file |
 | `preprocess.video_codec` | AVI FourCC (default `FFV1`, lossless) |
-| `preprocess.pipeline_version` | Stored in every result row; bump it when models or preprocessing change |
+| `preprocess.pipeline_version` | Stored in every result row. Bump it when models or preprocessing change: records whose latest result has a different version are processed again. |
 | `models.*` | Weight paths, plus `echoprime_compile` (`torch.compile`) |
 
 ## Running
@@ -166,6 +187,7 @@ sbatch slurm/02_run_with_classifier.sbatch       [configs/config.yaml] [--retry-
 sbatch slurm/02_run_preprocess_only.sbatch       [configs/config.yaml] [--retry-errors]   # CPU only, then merge
 ```
 
+- When you call `sbatch` directly, run `mkdir -p slurm/logs` first (it's gitignored, and Slurm can't write the job output without it). `submit_pipeline.sh` does this for you.
 - Before you submit, set the partition and account in the `#SBATCH` lines, and add a `module load` if `uv` isn't on the compute nodes' `PATH`.
 - The scripts can't read the config, so keep their resource requests in step with it by hand:
   - `--gres=gpu:N` must be at least `preprocess.num_gpus`.
@@ -192,19 +214,22 @@ sbatch slurm/02_run_preprocess_only.sbatch       [configs/config.yaml] [--retry-
   - `excluded_missing_study_uid`
   - `excluded_too_many_frames`: more frames than `index.max_num_frames`
   - `excluded_no_video_region`: a video with no 2D tissue/color region
+  - `excluded_no_image_region`: an image with no region sequence, or with no 2D tissue/color region and no M-mode/spectral
+    region
   - `error`, where `Detail` holds the exception type only
 - **`logs/`**: counts and exception types only.
 
 ### Anonymized area (`paths.output_root`)
 
 - **`files/<AnonPatientID>/<AnonStudyID>/<name>.png|.avi`**: preprocessed, PHI-masked media.
+- **`logs/`**: Script 2 and `merge` logs (counts and exception types only).
 - **`results/rank=<r>/part-NNNNNN.parquet`**: raw result rows, append-only. Each row has `RecordID`, `OutputPath`, `Status`, `ErrorType`, the view-classification columns (see below), `PipelineVersion` and `Timestamp`.
   - `Status` is one of `success`, `preprocessed` (media saved by `run_echo_preprocessing_and_anonymization.py`, not classified), `skipped_oversize`, `skipped_undecodable` or `error`.
   - View classification (on `success` rows only, see [View classification](#view-classification)):
     - `EchoFine_View=<view>` / `EchoPrime_View=<view>`: the score for each view.
     - `View_EchoFine` / `View_EchoPrime`: the top-scoring view.
     - `ViewScore_EchoFine` / `ViewScore_EchoPrime`: that view's score.
-- **`echo-record-list.parquet`**: the final table, written by `merge`. It keeps the latest row per `RecordID`, joined with the manifest through an explicit keep-list. `AnonPatientID` / `AnonStudyID` are renamed to `PatientID` / `StudyID` here, since the final outputs hold no real IDs, and `OutputPath` is renamed to `FilePath` (relative to `files/`).
+- **`echo-record-list.parquet`**: the final table, written by `merge`. It keeps the latest row per `RecordID`, joined with the manifest through an explicit keep-list. Rows of every status are kept (check `Status`; only `success` rows have view columns), and manifest records with no result yet are not in it. `AnonPatientID` / `AnonStudyID` are renamed to `PatientID` / `StudyID` here, since the final outputs hold no real IDs, and `OutputPath` is renamed to `FilePath` (relative to `files/`).
 - **`echo-study-list.csv`**: written by `merge`, one row per study in the record list, with columns `PatientID` (the anonymized `AnonPatientID`), `StudyID` (the anonymized `AnonStudyID`) and `StudyDateTime` (the shifted StudyDate plus the StudyTime; date only if StudyTime is missing).
 
 ## Output naming
@@ -233,11 +258,20 @@ Both scripts can be killed at any point and rerun with the same command.
 - A truncated last crosswalk line (crash mid-append) is dropped on startup. Counters resume from the highest existing IDs.
 
 **Script 2**
-- A `RecordID` with any row in `results/` counts as done. The exception is `preprocessed`: it counts as done for `run_echo_preprocessing_and_anonymization.py` but as pending for `run`.
+- A `RecordID` whose latest row in `results/` has the current `pipeline_version` counts as done, whatever its status. The exception is `preprocessed`: it counts as done for `run_echo_preprocessing_and_anonymization.py` but as pending for `run`. A row from another `pipeline_version` counts as pending.
 - A row is written only after both models have run and the media file has been saved (temp file + rename).
 - A crash loses at most the unflushed rows. Those items are redone, and their media files are overwritten atomically.
 - `--retry-errors` re-queues items whose latest status is `error`. `merge` keeps the latest row per `RecordID`.
-- `merge` deletes `results/` once the merge is complete, meaning every manifest record has a result, none is `error`, and no media file is missing. Otherwise it keeps `results/` so that `run` can resume. After `results/` is deleted, a later `run` treats every record as pending again.
+- `merge` deletes `results/` once the merge is complete, meaning every manifest record has a result from the current `pipeline_version`, none is `error`, and no media file is missing. Otherwise it keeps `results/` so that `run` can resume. After `results/` is deleted, a later `run` treats every record as pending again.
+
+## Tests
+
+```bash
+uv run pytest
+```
+
+The tests use only fake DICOMs generated by `tests/synthetic.py` and stub view classifiers, so they need no real data,
+model weights or GPU.
 
 ## Placeholders to fill in
 
@@ -258,4 +292,5 @@ src/io_utils.py                                              config, atomic parq
 src/view_classifier/                                         EchoFine / EchoPrime loaders and inference
 scripts/                                                     shell wrappers for each stage
 slurm/                                                       example sbatch scripts for each stage, plus submit_pipeline.sh
+tests/                                                       pytest suite on synthetic DICOMs (no real data, no GPU)
 ```
