@@ -93,10 +93,18 @@ version of each file is ever written to disk.
 
 Script 2 labels each record with its echocardiographic view using two classifiers:
 
-| Model | Framework | Views | Input | Paper |
-|---|---|---|---|---|
-| EchoFine | TF/Keras | 47 | The **full, unmasked frames**, center-cropped to a square and resized to 224×224. It runs once per file, and all region records of that file share the result. | [EchoFine paper](TODO-link-to-paper) |
-| EchoPrime | PyTorch | 11 | The record's masked media, center-cropped to a square and resized to 224×224 | [EchoPrime paper](TODO-link-to-paper) |
+| Model | Framework | Views | Paper | Repo |
+|---|---|---|---| --- |
+| EchoFine | TF/Keras | 47 | [EchoFine paper](https://doi.org/10.1016/j.media.2026.104006) | [EchoFine repo](https://github.com/thrive-centre/EchoForge/tree/main/echoforge/classification/models/EchoView47) |
+| EchoPrime | PyTorch | 11 | [EchoPrime paper](https://doi.org/10.1038/s41586-025-09850-x) | [EchoPrime repo](https://github.com/echonet/EchoPrime) |
+
+The inputs depend on the record type. Every input is center-cropped to a square and resized to 224×224 before it is
+passed to the model.
+
+| Model | Video record | Image record |
+|---|---|---|
+| EchoFine | All **full, unmasked frames** of the source file. It runs once per file, and all region records of that file share the result. | The **full, unmasked frame**. |
+| EchoPrime | The record's masked clip, i.e. the saved video: cropped to the region box, motion-masked and cropped to the sector (see [Masking](#video-and-image-anonymization)). | The masked image **cropped to `BBox2D`**, so the model sees only the 2D region. If the image has no `BBox2D` (only a 1D box), the whole masked image is used instead. The saved image still keeps the full frame. |
 
 Each model's per-frame probabilities are reduced to one score per view, `score = mean / (1 + std)` over frames, so views
 that are confident and consistent across the clip score highest. The top-scoring view is stored as the record's view (see
@@ -301,3 +309,12 @@ scripts/                                                     shell wrappers for 
 slurm/                                                       example sbatch scripts for each stage, plus submit_pipeline.sh
 tests/                                                       pytest suite on synthetic DICOMs (no real data, no GPU)
 ```
+
+## Acknowledgements
+
+We thank the authors of these open-source projects, which this pipeline builds on:
+
+- **[EchoFine](https://github.com/thrive-centre/EchoForge/tree/main/echoforge/classification/models/EchoView47)**
+  ([paper](https://doi.org/10.1016/j.media.2026.104006)): the 47-view classifier.
+- **[EchoPrime](https://github.com/echonet/EchoPrime)** ([paper](https://doi.org/10.1038/s41586-025-09850-x)): the
+  11-view classifier, and the motion-based ultrasound masking that our video masking is adapted from.

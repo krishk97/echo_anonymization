@@ -151,6 +151,30 @@ def test_image_masked_outside_regions(indexed: Indexed) -> None:
     assert img[keep].max() > 0
 
 
+def test_image_echoprime_input_is_2d_box(indexed: Indexed) -> None:
+    """EchoPrime gets an image's BBox2D crop, or the whole image without a 2D box.
+
+    Args:
+        indexed: The indexed tree fixture.
+    """
+    cfg, paths = indexed
+    shards = script2.shard_files(script2.pending_records(cfg, False), 1)
+    src, recs = next(f for f in shards[0] if f[0] == paths["a1_s1_img"])
+    no_2d = {**recs[0], **{f"BBox2D{c}": None for c in ("X0", "Y0", "X1", "Y1")}}
+    dataset = script2.AnonymizedEchoDataset([(src, recs), (src, [no_2d])])
+
+    out = dataset[0]["records"][0]
+    x0, y0, x1, y1 = (recs[0][f"BBox2D{c}"] for c in ("X0", "Y0", "X1", "Y1"))
+    expected = script2.resize_frames(out["media"][np.newaxis, y0:y1, x0:x1])
+    np.testing.assert_array_equal(out["echoprime_in"], expected)
+    full = script2.resize_frames(out["media"][np.newaxis])
+    assert not np.array_equal(out["echoprime_in"], full)
+
+    out = dataset[1]["records"][0]
+    expected = script2.resize_frames(out["media"][np.newaxis])
+    np.testing.assert_array_equal(out["echoprime_in"], expected)
+
+
 def test_multi_region_shares_echofine(indexed: Indexed) -> None:
     """All region records of one file share the file's EchoFine output.
 

@@ -16,7 +16,9 @@ classification.
 Model inputs (per source file / record):
   - EchoFine:  the full, unmasked frames (as in the old pipeline), run once per
                source file and shared by all of that file's region records.
-  - EchoPrime: the record's preprocessed (cropped + PHI-masked) media.
+  - EchoPrime: videos get the record's preprocessed (cropped + PHI-masked) clip;
+               images get the masked image cropped to BBox2D (the whole masked
+               image if there is no 2D box).
 Only the preprocessed media is written to disk.
 """
 
@@ -186,10 +188,17 @@ class AnonymizedEchoDataset(Dataset):
                     media = self.preprocess_echo_video(frames, _bbox(rec, "BBox"))
                     echoprime_in = resize_frames(media)
                 else:
+                    bbox_2d = _bbox(rec, "BBox2D")
                     media = self.preprocess_echo_image(
-                        frames[0], _bbox(rec, "BBox2D"), _bbox(rec, "BBox1D")
+                        frames[0], bbox_2d, _bbox(rec, "BBox1D")
                     )
-                    echoprime_in = resize_frames(media[np.newaxis])
+                    # EchoPrime sees only the 2D region (the whole masked image
+                    # if there is none).
+                    prime_src = media
+                    if bbox_2d is not None:
+                        x0, y0, x1, y1 = bbox_2d
+                        prime_src = media[y0:y1, x0:x1]
+                    echoprime_in = resize_frames(prime_src[np.newaxis])
                 out.append(
                     {
                         **b,
