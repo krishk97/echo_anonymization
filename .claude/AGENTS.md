@@ -37,7 +37,14 @@ All settings live in `configs/config.yaml`, which both scripts share. The user i
 
 ```
 create_anonymization_plan.py                                 Script 1. Also holds the output-naming functions (assign_stem, record_id_for, stem_of).
-                                                             find_files_by_extension is the user's helper; keep it.
+                                                             find_files_by_extension is the user's helper; keep it (and its signature).
+                                                             It is a level-by-level os.scandir walk (_scan_dir) on a thread pool of
+                                                             index.scan_threads (default 1), same results as the old rglob + is_file.
+                                                             Logs "Discovery: N dirs scanned, M queued, K files found" every 10 s.
+                                                             Measured 2026-10-09 on this node's local XFS, 200k files: rglob 1.5s,
+                                                             1 thread 1.2s, 4 threads 3.1s, 8+ threads ~13s; threads only pay off on
+                                                             network FS metadata latency (untested). Don't use concurrent.futures.wait
+                                                             over all pending futures: it was quadratic in the number of dirs.
 run_echo_preprocessing_and_anonymization_with_classifier.py  Script 2: AnonymizedEchoDataset, Models/load_models, run_rank, ResultWriter,
                                                              pending_records, shard_files, run, merge, cli
 run_echo_preprocessing_and_anonymization.py                  CPU-only Script 2 without classifiers: _rank_entry, run, cli (reuses Script 2's functions)
@@ -87,7 +94,7 @@ The user keeps this on disk for their own use, and it is deliberately **not** pa
 
 **Script 2**
 - Done = every `RecordID` whose latest row in `output_root/results/rank=*/part-*.parquet` has the config's `preprocess.pipeline_version`, whatever its status. A different version means pending (user decision, 2026-10-08), so bumping the version reprocesses everything; `merge` counts such rows as incomplete (QA line "records from another pipeline_version") and keeps `results/`. With `--retry-errors`, items whose latest row is `error` are re-queued. Items whose latest row is `preprocessed` are pending for `run_echo_preprocessing_and_anonymization_with_classifier.py run` (`classify=True`, the default) but done for `run_echo_preprocessing_and_anonymization.py` (`classify=False`).
-- `read_manifests(cfg)` returns `{"video", "image"}` frames; `pending_records` concatenates them (cross-type columns are NaN), and `shard_files` uses `reindex(columns=RECORD_FIELDS)` because each type lacks the other's box columns. `results/` is one shared dir for both types, keyed by `RecordID`.
+- `read_manifests(cfg)` returns `{"video", "image"}` frames; `pending_records` concatenates them (cross-type columns are NaN), and `shard_files` uses `reindex(columns=RECORD_FIELDS)` because each type lacks the other's box columns. It converts the whole frame to records once and groups in plain Python; per-`groupby` pandas calls took ~15+ min at 750k files. `results/` is one shared dir for both types, keyed by `RecordID`.
 - Pending records are grouped **by source file** and sorted by `DecodedBytes` (largest first), then dealt round-robin to the ranks.
 - The parent sets `CUDA_VISIBLE_DEVICES` before each `spawn` and maps rank r to the r-th GPU already visible to the job. TF is imported only inside `load_models` and enables memory growth.
 - DataLoader: `batch_size=None`, identity collate, `multiprocessing_context="spawn"`, `in_order=False`, `persistent_workers=True`, `worker_init_fn=_init_worker` (calls `quiet_pydicom()`).

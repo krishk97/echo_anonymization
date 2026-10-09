@@ -27,7 +27,7 @@ import os
 import shutil
 import time
 from argparse import ArgumentParser
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -704,14 +704,18 @@ def shard_files(
     Returns:
         One shard per rank: (source path, record dicts) per file.
     """
-    groups = []
-    for source_path, g in pending.groupby("SourcePath", sort=False):
-        # Videos have no image boxes and vice versa; a column may be missing entirely.
-        fields = g.reindex(columns=RECORD_FIELDS)
-        recs = fields.astype(object).where(fields.notna(), None).to_dict("records")
-        groups.append((int(g["DecodedBytes"].iloc[0]), source_path, recs))
-    groups.sort(key=lambda t: (-t[0], t[1]))
-    return [[(src, recs) for _, src, recs in groups[r::n]] for r in range(n)]
+    # Videos have no image boxes and vice versa; a column may be missing entirely.
+    # Converted once for the whole frame: per-group pandas calls are far too slow
+    # for hundreds of thousands of files.
+    fields = pending.reindex(columns=RECORD_FIELDS)
+    recs = fields.astype(object).where(fields.notna(), None).to_dict("records")
+    by_src: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    sizes: dict[str, int] = {}
+    for src, size, rec in zip(pending["SourcePath"], pending["DecodedBytes"], recs):
+        by_src[src].append(rec)
+        sizes.setdefault(src, int(size))
+    order = sorted(by_src, key=lambda s: (-sizes[s], s))
+    return [[(s, by_src[s]) for s in order[r::n]] for r in range(n)]
 
 
 def run(cfg: dict[str, Any], retry_errors: bool, log_level: str) -> bool:

@@ -131,6 +131,7 @@ Everything is set in **`configs/config.yaml`**. Usually you only edit `paths:`.
 | `paths.secure_dir` | **Contains PHI**: `anonymization_crosswalk.csv`, `manifest/`, `status/`, Script 1 logs. Restrict access. |
 | `paths.output_root` | Anonymized outputs: `files/`, `results/`, `echo-video-list.parquet`, `echo-image-list.parquet`, `echo-study-list.csv`, Script 2 logs |
 | `index.num_workers`, `index.chunk_size` | Header-reading pool size and files per chunk |
+| `index.scan_threads` | Threads listing directories during file discovery (default 1). More can speed up discovery on a network filesystem (Lustre/GPFS/NFS) but slow it down on a local disk; time it on your storage. |
 | `index.sop_classes` | SOP classes to keep (default: the two ultrasound storage classes) |
 | `index.max_num_frames` | Files with more frames than this are excluded (`excluded_too_many_frames`); `null` = no limit |
 | `index.max_decoded_gb` | Files whose decoded RGB size exceeds this are flagged `Oversize` and skipped by Script 2 (`skipped_oversize`) |

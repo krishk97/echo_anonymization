@@ -11,10 +11,12 @@ part without its status part is deleted on startup and redone.
 """
 
 import multiprocessing as mp
+import os
 import re
 import time
 from argparse import ArgumentParser
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -56,23 +58,77 @@ INT_COLUMNS = ["NumFrames", "DecodedBytes"] + [
 FLOAT_COLUMNS = [f"{t}{s}" for s in REGION_SUFFIXES for t in sorted(FLOAT_TAGS)]
 
 
-def find_files_by_extension(folder: str | Path, extension: str) -> list[Path]:
+def _scan_dir(directory: str, suffix: str) -> tuple[list[str], list[str]]:
+    """Lists one directory's matching files and its subdirectories.
+
+    Uses the entry type from `os.scandir`, so no `stat` is needed except for
+    symlinks. Symlinked directories are not followed; symlinked files are kept.
+
+    Args:
+        directory: Directory to list.
+        suffix: Lowercase extension with the leading dot (e.g. ".dcm").
+
+    Returns:
+        The matching file paths and the subdirectory paths.
+    """
+    files, subdirs = [], []
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    subdirs.append(entry.path)
+                elif (
+                    os.path.splitext(entry.name)[1].lower() == suffix
+                    and entry.is_file()
+                ):
+                    files.append(entry.path)
+    except PermissionError:  # Skipped, as `Path.rglob` does.
+        pass
+    return files, subdirs
+
+
+def find_files_by_extension(
+    folder: str | Path, extension: str, num_threads: int = 1
+) -> list[Path]:
     """Recursively find all files with a given extension.
+
+    Directories are listed from a thread pool. On a network filesystem each
+    listing waits mostly on metadata latency, so threads can help there; on a
+    local disk with cached metadata they make it slower. The order is not defined.
+    Progress (counts only, no paths) is logged every 10 seconds.
 
     Args:
         folder: Path to the directory to search.
         extension: File extension, with or without the leading dot (e.g. "txt" or
             ".txt").
+        num_threads: Number of directories listed at once.
 
     Returns:
         A list of Path objects for each matching file.
     """
-    extension = extension.lstrip(".").lower()
-    return [
-        path
-        for path in Path(folder).rglob("*")
-        if path.is_file() and path.suffix.lower() == f".{extension}"
-    ]
+    suffix = "." + extension.lstrip(".").lower()
+    found: list[str] = []
+    dirs = [str(folder)]
+    n_scanned, last_log = 0, time.monotonic()
+    with ThreadPoolExecutor(num_threads) as pool:
+        while dirs:  # One directory level per pass.
+            subdirs = []
+            for i, (level_files, level_subdirs) in enumerate(
+                pool.map(partial(_scan_dir, suffix=suffix), dirs)
+            ):
+                found.extend(level_files)
+                subdirs.extend(level_subdirs)
+                n_scanned += 1
+                if time.monotonic() - last_log >= 10:
+                    logger.info(
+                        "Discovery: {} dirs scanned, {} queued, {} files found",
+                        n_scanned,
+                        len(dirs) - i - 1 + len(subdirs),
+                        len(found),
+                    )
+                    last_log = time.monotonic()
+            dirs = subdirs
+    return [Path(p) for p in found]
 
 
 # --------------------------------------------------------------------------------------
@@ -386,7 +442,9 @@ def main(cfg: dict[str, Any]) -> Counter:
     files = sorted(
         str(p)
         for p in find_files_by_extension(
-            Path(paths["dicom_root"]).resolve(), paths["dicom_extension"]
+            Path(paths["dicom_root"]).resolve(),
+            paths["dicom_extension"],
+            icfg["scan_threads"],
         )
     )
     pending = [f for f in files if f not in done]

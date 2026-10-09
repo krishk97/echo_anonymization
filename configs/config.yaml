@@ -14,6 +14,9 @@ paths:
 # ---------------- Script 1: create_anonymization_plan.py (CPU) ----------------
 index:
   num_workers: 32
+  # Threads listing directories during file discovery. >1 can help on a network FS
+  # (Lustre/GPFS/NFS); on a local disk 1 is fastest.
+  scan_threads: 1
   chunk_size: 10000
   sop_classes:
     - Ultrasound Image Storage

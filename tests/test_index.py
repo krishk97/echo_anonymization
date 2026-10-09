@@ -511,3 +511,29 @@ def test_age_and_date_helpers() -> None:
     assert shift_date("20200101", 1) == "20200102"
     assert shift_date("20200101120000.5", 31) == "20200201120000.5"
     assert shift_date("bad", 5) is None
+
+
+@pytest.mark.parametrize("num_threads", [1, 8])
+def test_find_files_matches_rglob(tmp_path: Path, num_threads: int) -> None:
+    """The threaded scandir walk finds the same files as the old `rglob` version.
+
+    Args:
+        tmp_path: pytest's temporary directory.
+        num_threads: Thread count passed to `find_files_by_extension`.
+    """
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    for d in (root / "a" / "b", root / "c", outside):
+        d.mkdir(parents=True)
+    for f in ("x.dcm", "a/y.DCM", "a/b/z.dcm", "a/b/n.txt", "c/.dcm", "c/noext"):
+        (root / f).touch()
+    (outside / "o.dcm").touch()
+    (root / "linked_dir").symlink_to(outside, target_is_directory=True)
+    (root / "c" / "linked.dcm").symlink_to(outside / "o.dcm")
+
+    expected = sorted(
+        p for p in root.rglob("*") if p.is_file() and p.suffix.lower() == ".dcm"
+    )
+    found = sorted(script1.find_files_by_extension(root, "dcm", num_threads))
+    assert found == expected
+    assert root / "c" / "linked.dcm" in found
+    assert len(found) == 4
