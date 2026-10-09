@@ -44,8 +44,7 @@ can identify a patient stays in the secure area (`paths.secure_dir`); only de-id
 
 ### Video and image anonymization
 
-Burned-in PHI (names, dates, IDs and other text overlaid on the frames) is removed from the pixels. Only the masked
-version of each file is ever written to disk.
+Burned-in PHI (names, dates, IDs and other text overlaid on the frames) is removed from the pixels by running a masking routine. Only the masked version of each file is ever written to disk.
 
 **Regions (Script 1).** The regions come from the DICOM `SequenceOfUltrasoundRegions`:
 
@@ -68,14 +67,12 @@ version of each file is ever written to disk.
   2. Build one mask for the whole clip from pixel motion: a pixel is kept if it is non-black on average and varies over
      time. The variation map is eroded first, so small changes such as the ECG trace or updating heart-rate text don't
      count as motion. If several separate areas remain, the largest is taken as the ultrasound sector and filled out to
-     its convex hull.
+     its convex hull.  This motion mask is adapted from [EchoPrime](https://github.com/echonet/EchoPrime/blob/main/video_utils.py) (`mask_outside_ultrasound_video`).
   3. Zero every pixel outside the sector in every frame. This removes static overlays (names, dates, labels, the ECG
      trace).
   4. Crop the clip to the sector's bounding box.
-
-  The motion mask is adapted from
-  [EchoPrime](https://github.com/echonet/EchoPrime/blob/main/video_utils.py) (`mask_outside_ultrasound_video`).
-- **Images** have no motion to use, so the boxes alone define what is kept. The output keeps the full frame size, and
+  
+- **Images** have no motion to use, so the region boxes alone define what is kept. The output keeps the full frame size, and
   every pixel outside `BBox2D ∪ BBox1D` is zeroed. Pixels inside the boxes are kept as they are, so any text drawn
   inside a box is not removed.
 
