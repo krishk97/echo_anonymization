@@ -76,16 +76,6 @@ Burned-in PHI (names, dates, IDs and other text overlaid on the frames) is remov
   every pixel outside `BBox2D ∪ BBox1D` is zeroed. Pixels inside the boxes are kept as they are, so any text drawn
   inside a box is not removed.
 
-<!-- TODO: replace with an example of a masked video (e.g. a GIF of original vs. anonymized). -->
-![Video masking example: original (left) and anonymized (right)](docs/figures/video_masking_example.gif)
-
-*Figure 1. Video masking example. (placeholder)*
-
-<!-- TODO: replace with an example of a masked image (e.g. an M-mode or Doppler still). -->
-![Image masking example: original (left) and anonymized (right)](docs/figures/image_masking_example.png)
-
-*Figure 2. Image masking example. (placeholder)*
-
 ### View classification
 
 Script 2 labels each record with its echocardiographic view using two classifiers:
