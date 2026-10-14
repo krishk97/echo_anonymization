@@ -60,6 +60,12 @@ run_echo_preprocessing_and_anonymization_with_classifier.py  Script 2: Anonymize
 run_echo_preprocessing_and_anonymization.py                  CPU-only Script 2 without classifiers: _rank_entry, run, cli (reuses Script 2's functions)
 run_preprocessing_on_anonymized.py                           already-anonymized datasets: ListIds, read_list/write_list, build_work_dir, finalize_outputs, main, cli
                                                              (README section "Preprocessing only"; wrapper scripts/run_preprocess_anonymized.sh)
+                                                             MIMIC-IV-ECHO wrappers: scripts/run_preprocess_mimic_iv_echo.sh (defaults MIMIC_ROOT=
+                                                             /scratch/shared/physionet.org/files/mimic-iv-echo/1.0.1, OUTPUT_ROOT/WORK_DIR under
+                                                             /scratch/$USER, CONFIG=configs/config_preprocess_anonymized.yaml; all env-overridable)
+                                                             and slurm/03_preprocess_mimic_iv_echo.sbatch (calls it; 64 CPUs = 8 x (7 + 1) from that
+                                                             config; GPUs via `sbatch --gres=...` + --classify). The dataset isn't mounted on the dev
+                                                             node; both were only tested against a synthetic MIMIC_ROOT.
 src/anon_crosswalk.py                                        AnonCrosswalk class: load + truncated-last-line recovery, assign(), append+fsync
 src/dicom_utils.py                                           read_header (read_partial, stop at pixel data; reports has_pixels), sop_class_name,
                                                              to_primitive, compute_fps, shift_date, cap_age, extract_header (worker entry),

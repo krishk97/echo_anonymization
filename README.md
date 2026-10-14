@@ -236,6 +236,25 @@ scripts/run_preprocess_anonymized.sh --config configs/config_preprocess_anonymiz
   --work-dir    /data/mimic-iv-echo-work
 ```
 
+For MIMIC-IV-ECHO there are also ready-made wrappers that fill in all of the above. By default they read the dataset
+from `/scratch/shared/physionet.org/files/mimic-iv-echo/1.0.1/` and write to `/scratch/$USER/mimic-iv-echo-preprocessed`
+(work dir `/scratch/$USER/mimic-iv-echo-work`), using `configs/config_preprocess_anonymized.yaml`. Override any of these
+with the environment variables `MIMIC_ROOT`, `OUTPUT_ROOT`, `WORK_DIR` and `CONFIG`:
+
+```bash
+scripts/run_preprocess_mimic_iv_echo.sh [--classify] [--retry-errors]
+OUTPUT_ROOT=/scratch/me/mimic-echo scripts/run_preprocess_mimic_iv_echo.sh
+
+# On Slurm (from the repo root), CPU only:
+mkdir -p slurm/logs
+sbatch slurm/03_preprocess_mimic_iv_echo.sbatch [--retry-errors]
+# with the view classifiers: request GPUs on the command line
+sbatch --gres=gpu:4 --partition=<gpu-partition> slurm/03_preprocess_mimic_iv_echo.sbatch --classify
+```
+
+The sbatch script requests 64 CPUs, which matches `configs/config_preprocess_anonymized.yaml`
+(`num_cpu_procs` × (`num_workers` + 1) = 8 × 8). Keep the two in step if you change either.
+
 **What it does**
 
 1. Reads every listed DICOM header (like Script 1) and writes a work manifest to `--work-dir`. The IDs come from the

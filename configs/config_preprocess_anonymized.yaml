@@ -53,8 +53,9 @@ preprocess:
   num_cpu_procs: 8
   # With --classify: one process per GPU.
   num_gpus: 4
-  # DataLoader workers per process; they decode, mask and save the media.
-  num_workers: 16
+  # DataLoader workers per process; they decode, mask and save the media. CPUs needed:
+  # num_cpu_procs (or num_gpus) * (num_workers + 1) = 64 here (32 with --classify); slurm/03_preprocess_mimic_iv_echo.sbatch requests 64.
+  num_workers: 7
   prefetch_factor: 2
   # Frames per model call (--classify only).
   frame_chunk: 64
