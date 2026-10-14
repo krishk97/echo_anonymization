@@ -89,8 +89,8 @@ def test_merge_dedupes_and_keeps_only_allowed_columns(
     assert table.set_index("RecordID")["FilePath"].equals(
         manifest.set_index("RecordID")["OutputPath"].loc[table["RecordID"]]
     )
-    assert table["PatientID"].str.fullmatch(r"P\d{6}").all()
-    assert table["StudyID"].str.fullmatch(r"S\d{6}").all()
+    assert table["PatientID"].str.fullmatch(r"P[0-9a-f]{16}").all()
+    assert table["StudyID"].str.fullmatch(r"S[0-9a-f]{16}").all()
 
     text = table.astype(str).to_string()
     for phi in synthetic.FAKE_PHI + ["SYN-A", "SYN-B", "ACCSYN", str(dicom_tree[0])]:

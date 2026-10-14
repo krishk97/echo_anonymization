@@ -1,0 +1,72 @@
+# Example config for run_preprocessing_on_anonymized.py (already-anonymized datasets, e.g. MIMIC-IV-ECHO).
+# Pass it with --config. There is no `paths` section: the record list, study list, output root and work dir
+# are given on the command line, e.g.
+#   scripts/run_preprocess_anonymized.sh --config configs/config_preprocess_anonymized.yaml \
+#     --record-list /data/mimic-iv-echo/echo-record-list.csv --study-list /data/mimic-iv-echo/echo-study-list.csv \
+#     --path-column dicom_filepath --patient-column subject_id --study-column study_id \
+#     --output-root /data/mimic-iv-echo-preprocessed --work-dir /data/mimic-iv-echo-work
+# The keys below mean the same as in configs/config.yaml. Keys used only by Script 1 (date_offset_days,
+# chunk_size, scan_threads) are left out: IDs come from the record list and dates are not shifted.
+
+# ---------------- Header reading and record building ----------------
+index:
+  # Processes reading the listed DICOM headers.
+  num_workers: 32
+  sop_classes:
+    - Ultrasound Image Storage
+    - Ultrasound Multi-frame Image Storage
+  # Files with more frames than this are excluded (`excluded_too_many_frames`). null = no limit.
+  max_num_frames: null
+  # Records whose decoded RGB size exceeds this are flagged `oversize` and skipped.
+  max_decoded_gb: 4.0
+  # Ages of this many years or more become "<age_cap_years>+".
+  age_cap_years: 90
+  default_fps: 30
+  # Dates copied UNCHANGED into <Keyword>Shifted (the dataset's own shift is kept).
+  date_fields: [StudyDate, SeriesDate, AcquisitionDate, ContentDate, AcquisitionDateTime]
+  # Only these header fields are copied into the output lists.
+  metadata_allowlist:
+    - Modality
+    - Manufacturer
+    - ManufacturerModelName
+    - Rows
+    - Columns
+    - NumberOfFrames
+    - FrameTime
+    - FrameTimeVector
+    - CineRate
+    - EffectiveDuration
+    - PhotometricInterpretation
+    - SamplesPerPixel
+    - BitsAllocated
+    - SeriesNumber
+    - InstanceNumber
+    - PatientSex
+    - PatientSize
+    - PatientWeight
+    - HeartRate
+    - UltrasoundColorDataPresent
+
+# ---------------- Preprocessing (and view classification with --classify) ----------------
+preprocess:
+  # Without --classify: number of CPU processes, each with `num_workers` DataLoader workers.
+  num_cpu_procs: 8
+  # With --classify: one process per GPU.
+  num_gpus: 4
+  # DataLoader workers per process; they decode, mask and save the media.
+  num_workers: 16
+  prefetch_factor: 2
+  # Frames per model call (--classify only).
+  frame_chunk: 64
+  # Write a results part file every K rows.
+  flush_every: 500
+  # FourCC codec for AVI output (FFV1 = lossless).
+  video_codec: FFV1
+  # Recorded in every result row; bump it to reprocess everything.
+  pipeline_version: v1
+
+# Only needed with --classify.
+models:
+  echofine_weights: ./weights/TTE47_Classifier_Model.h5
+  echoprime_weights: ./weights/echoprime_view_classifier.pt
+  echoprime_compile: false

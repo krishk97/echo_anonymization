@@ -11,7 +11,7 @@ import pytest
 
 import create_anonymization_plan as script1
 import synthetic
-from src.anon_crosswalk import ANON_CROSSWALK_COLUMNS, AnonCrosswalk
+from src.anon_crosswalk import ANON_CROSSWALK_COLUMNS, ANON_ID_PATTERN, AnonCrosswalk
 from src.dicom_utils import (
     Region,
     cap_age,
@@ -46,6 +46,29 @@ def outputs(cfg: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
         pd.read_csv(
             secure / "anonymization_crosswalk.csv", dtype=str, keep_default_na=False
         ),
+    )
+
+
+def real_record_ids(cfg: dict[str, Any]) -> pd.Series:
+    """Returns each file's RecordIDs with the anonymized IDs replaced by real keys.
+
+    Anonymized IDs are random, so two separate runs only agree after mapping
+    `<AnonPatientID>/<AnonStudyID>` back to `<PatientID>/<StudyInstanceUID>`.
+
+    Args:
+        cfg: The config Script 1 ran with.
+
+    Returns:
+        `<PatientID>/<StudyInstanceUID>/<name>`, indexed by SourcePath and sorted.
+    """
+    manifest, _, xw = outputs(cfg)
+    real = {
+        f"{r.AnonPatientID}/{r.AnonStudyID}": f"{r.PatientID}/{r.StudyInstanceUID}"
+        for r in xw.itertuples()
+    }
+    ids = manifest.set_index("SourcePath")["RecordID"].sort_index()
+    return ids.map(
+        lambda rid: "{}/{}".format(real[rid.rsplit("/", 1)[0]], rid.rsplit("/", 1)[1])
     )
 
 
@@ -232,10 +255,7 @@ def test_naming_is_deterministic(dicom_tree: DicomTree, make_cfg: MakeCfg) -> No
     )
     for cfg in (cfg_a, cfg_b, cfg_c):
         run(cfg)
-    ids = [
-        outputs(c)[0].set_index("SourcePath")["RecordID"].sort_index()
-        for c in (cfg_a, cfg_b, cfg_c)
-    ]
+    ids = [real_record_ids(c) for c in (cfg_a, cfg_b, cfg_c)]
     pd.testing.assert_series_equal(ids[0], ids[1])
     # file names inside the study don't depend on the chunk size
     pd.testing.assert_series_equal(
@@ -304,7 +324,10 @@ def test_crosswalk_rows_and_patient_reuse(
     pat_a = xw[xw["PatientID"] == "SYN-A"]
     assert pat_a["AnonPatientID"].nunique() == 1
     assert pat_a["DateOffsetDays"].nunique() == 1
-    assert sorted(xw["AnonStudyID"]) == ["S000000", "S000001", "S000002"]
+    assert xw["AnonStudyID"].is_unique
+    for col, prefix in (("AnonPatientID", "P"), ("AnonStudyID", "S")):
+        assert all(ANON_ID_PATTERN.fullmatch(v) for v in xw[col])
+        assert xw[col].str.startswith(prefix).all()
     offset = int(pat_a["DateOffsetDays"].iloc[0])
     lo, hi = cfg["index"]["date_offset_days"]
     assert lo <= offset <= hi
@@ -350,8 +373,11 @@ def test_crosswalk_continues_after_restart(
     old_a = xw1[xw1["PatientID"] == "SYN-A"].iloc[0]
     assert new.loc["1.2.3.900", "AnonPatientID"] == old_a["AnonPatientID"]
     assert new.loc["1.2.3.900", "DateOffsetDays"] == old_a["DateOffsetDays"]
-    assert new.loc["1.2.3.901", "AnonPatientID"] == "P000002"
-    assert sorted(new["AnonStudyID"]) == ["S000003", "S000004"]
+    new_patient = new.loc["1.2.3.901", "AnonPatientID"]
+    assert ANON_ID_PATTERN.fullmatch(new_patient) and new_patient.startswith("P")
+    assert new_patient not in set(xw1["AnonPatientID"])
+    assert new["AnonStudyID"].is_unique
+    assert not set(new["AnonStudyID"]) & set(xw1["AnonStudyID"])
 
     run(cfg)  # nothing pending -> nothing changes
     assert len(pd.read_csv(xw_path, dtype=str)) == len(xw2)
@@ -360,7 +386,7 @@ def test_crosswalk_continues_after_restart(
 def test_truncated_crosswalk_line_recovered(
     dicom_tree: DicomTree, make_cfg: MakeCfg
 ) -> None:
-    """A partial final line from a crash is dropped and counters resume correctly.
+    """A partial final line from a crash is dropped and appending resumes.
 
     Args:
         dicom_tree: The synthetic tree fixture.
@@ -375,7 +401,7 @@ def test_truncated_crosswalk_line_recovered(
         f.write(b'"SYN-Z","SYNTH^PART')  # crash mid-append
     xw = AnonCrosswalk(xw_path, (1, 2))
     assert xw_path.read_bytes() == good
-    assert (xw.next_patient, xw.next_study) == (2, 3)
+    assert (len(xw.patients), len(xw.studies)) == (2, 3)
 
     synthetic.write(
         synthetic.make_dataset(patient_id="SYN-Z", study_uid="1.2.3.950", n_frames=6),
@@ -385,7 +411,33 @@ def test_truncated_crosswalk_line_recovered(
     with open(xw_path, newline="") as f:
         rows = list(csv.reader(f))
     assert all(len(r) == len(ANON_CROSSWALK_COLUMNS) for r in rows)
-    assert rows[-1][ANON_CROSSWALK_COLUMNS.index("AnonStudyID")] == "S000003"
+    study_col = ANON_CROSSWALK_COLUMNS.index("AnonStudyID")
+    assert len(rows) == 5  # header + 3 old + 1 new
+    assert ANON_ID_PATTERN.fullmatch(rows[-1][study_col])
+    assert rows[-1][study_col] not in {r[study_col] for r in rows[1:-1]}
+
+
+def test_old_sequential_crosswalk_rejected(tmp_path: Path) -> None:
+    """A crosswalk with old sequential IDs (P000000) fails to load.
+
+    Args:
+        tmp_path: pytest's per-test temporary directory.
+    """
+    xw_path = tmp_path / "anonymization_crosswalk.csv"
+    with open(xw_path, "w", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        writer.writerow(ANON_CROSSWALK_COLUMNS)
+        row = dict.fromkeys(ANON_CROSSWALK_COLUMNS, "")
+        row.update(
+            PatientID="SYN-A",
+            StudyInstanceUID="1.2.3",
+            AnonPatientID="P000000",
+            AnonStudyID="S000000",
+            DateOffsetDays="36200",
+        )
+        writer.writerow(row.values())
+    with pytest.raises(ValueError, match="another format"):
+        AnonCrosswalk(xw_path, (1, 2))
 
 
 # ---------------------------------------------------------------- crash / restart
@@ -438,10 +490,7 @@ def test_restart_after_crash(
     assert manifest["RecordID"].is_unique and status["SourcePath"].is_unique
     assert xw["StudyInstanceUID"].is_unique
     assert len(manifest) == len(clean_manifest) and len(status) == len(clean_status)
-    pd.testing.assert_series_equal(
-        manifest.set_index("SourcePath")["RecordID"].sort_index(),
-        clean_manifest.set_index("SourcePath")["RecordID"].sort_index(),
-    )
+    pd.testing.assert_series_equal(real_record_ids(cfg), real_record_ids(clean))
     secure = Path(cfg["paths"]["secure_dir"])
     n_status = len(list((secure / "status").glob("*.parquet")))
     for item_type in ("video", "image"):
@@ -461,11 +510,7 @@ def test_multiprocessing_matches_serial(
     serial, parallel = make_cfg("serial"), make_cfg("parallel", num_workers=2)
     run(serial)
     run(parallel)
-    a, b = outputs(serial)[0], outputs(parallel)[0]
-    pd.testing.assert_series_equal(
-        a.set_index("SourcePath")["RecordID"].sort_index(),
-        b.set_index("SourcePath")["RecordID"].sort_index(),
-    )
+    pd.testing.assert_series_equal(real_record_ids(serial), real_record_ids(parallel))
 
 
 # ---------------------------------------------------------------- PHI

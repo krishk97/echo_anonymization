@@ -1,17 +1,19 @@
 """Study-level anonymization crosswalk table.
 
-One row per study. IDs are sequential counters (P000000, S000000) -- no secret
-key, no hashing. Only the main process of Script 1 ever writes this file (single
-writer).
+One row per study. IDs are random (`P` / `S` + 16 hex digits from `secrets`), so
+they reveal neither the real keys nor the order in which patients/studies were
+seen -- no secret key, no hashing. Only the main process of Script 1 ever writes
+this file (single writer).
 
 Crash safety: rows are appended one line each (embedded newlines are replaced by
 spaces before writing), then flushed and fsynced. A crash mid-append can only
 leave a final line without a trailing newline; on load that partial line is
-truncated away and the counters are restored from the maximum existing IDs.
+truncated away. A crosswalk holding old sequential IDs (P000000) is rejected.
 """
 
 import csv
 import os
+import re
 import secrets
 from pathlib import Path
 from typing import Any
@@ -37,14 +39,23 @@ ANON_CROSSWALK_COLUMNS = (
 )
 
 
-def _format_id(prefix: str, n: int) -> str:
-    """Formats counter `n` as an anonymized ID such as `P000042`."""
-    return f"{prefix}{n:06d}"
+ANON_ID_PATTERN = re.compile(r"[PS][0-9a-f]{16}")
 
 
-def _parse_id(anon_id: str) -> int:
-    """Returns the counter value of an anonymized ID such as `P000042`."""
-    return int(anon_id[1:])
+def _new_id(prefix: str, taken: set[str]) -> str:
+    """Draws a random anonymized ID such as `P3f9a1c07b2e4d856`.
+
+    Args:
+        prefix: "P" for patients, "S" for studies.
+        taken: IDs already in use; the new ID is added to it.
+
+    Returns:
+        A new ID not in `taken`.
+    """
+    while (anon_id := prefix + secrets.token_hex(8)) in taken:
+        pass
+    taken.add(anon_id)
+    return anon_id
 
 
 def _clean(value: object) -> str:
@@ -61,8 +72,6 @@ class AnonCrosswalk:
             date offset, in days.
         patients: PatientID -> (AnonPatientID, DateOffsetDays).
         studies: StudyInstanceUID -> (AnonPatientID, AnonStudyID, DateOffsetDays).
-        next_patient: Counter for the next new AnonPatientID.
-        next_study: Counter for the next new AnonStudyID.
         key_conflicts: Number of studies seen again under a different PatientID.
     """
 
@@ -74,14 +83,15 @@ class AnonCrosswalk:
             date_offset_range: Inclusive (min, max) date offset range, in days.
 
         Raises:
-            ValueError: The file's header or a complete line is malformed.
+            ValueError: The file's header or a complete line is malformed, or it
+            holds IDs in another format (e.g. old sequential IDs).
         """
         self.path = Path(path)
         self.date_offset_range = date_offset_range
         self.patients: dict[str, tuple[str, int]] = {}
         self.studies: dict[str, tuple[str, str, int]] = {}
-        self.next_patient = 0
-        self.next_study = 0
+        self._patient_ids: set[str] = set()
+        self._study_ids: set[str] = set()
         self.key_conflicts = 0  # studies seen again under a different PatientID
         self._rng = secrets.SystemRandom()
         self._load()
@@ -121,6 +131,14 @@ class AnonCrosswalk:
                     f"expected {len(ANON_CROSSWALK_COLUMNS)}"
                 )
             rec = dict(zip(ANON_CROSSWALK_COLUMNS, row, strict=True))
+            if not all(
+                ANON_ID_PATTERN.fullmatch(rec[c])
+                for c in ("AnonPatientID", "AnonStudyID")
+            ):
+                raise ValueError(
+                    f"Crosswalk line {line_no} has an ID in another format "
+                    "(old sequential crosswalk?); start a new crosswalk"
+                )
             offset = int(rec["DateOffsetDays"])
             self.patients.setdefault(rec["PatientID"], (rec["AnonPatientID"], offset))
             self.studies[rec["StudyInstanceUID"]] = (
@@ -128,10 +146,8 @@ class AnonCrosswalk:
                 rec["AnonStudyID"],
                 offset,
             )
-            self.next_patient = max(
-                self.next_patient, _parse_id(rec["AnonPatientID"]) + 1
-            )
-            self.next_study = max(self.next_study, _parse_id(rec["AnonStudyID"]) + 1)
+            self._patient_ids.add(rec["AnonPatientID"])
+            self._study_ids.add(rec["AnonStudyID"])
         logger.info(
             "Crosswalk loaded: {} patients, {} studies",
             len(self.patients),
@@ -150,8 +166,8 @@ class AnonCrosswalk:
         """Assigns IDs to unseen patients/studies and durably appends their rows.
 
         For a study appearing several times, the first occurrence supplies the
-        patient/study fields. New IDs are handed out in sorted (PatientID,
-        StudyInstanceUID) order so the result is deterministic.
+        patient/study fields. New rows are appended in sorted (PatientID,
+        StudyInstanceUID) order; the IDs themselves are random.
 
         Args:
             study_records: Dicts holding the crosswalk source fields, in file order.
@@ -182,11 +198,9 @@ class AnonCrosswalk:
             pid = rec["PatientID"]
             if pid not in self.patients:
                 offset = self._rng.randint(*self.date_offset_range)
-                self.patients[pid] = (_format_id("P", self.next_patient), offset)
-                self.next_patient += 1
+                self.patients[pid] = (_new_id("P", self._patient_ids), offset)
             anon_patient, offset = self.patients[pid]
-            anon_study = _format_id("S", self.next_study)
-            self.next_study += 1
+            anon_study = _new_id("S", self._study_ids)
             self.studies[rec["StudyInstanceUID"]] = (anon_patient, anon_study, offset)
             new_rows.append(
                 [_clean(rec.get(c)) for c in PATIENT_FIELDS + STUDY_FIELDS]

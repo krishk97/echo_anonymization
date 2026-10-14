@@ -16,6 +16,7 @@ Two-stage pipeline that turns a large collection of echocardiogram DICOMs into:
 | `run_echo_preprocessing_and_anonymization_with_classifier.py run` (Script 2) | GPU | Decodes, crops/masks, runs both models, saves media, writes result parts |
 | `run_echo_preprocessing_and_anonymization.py` | CPU | Same as `run`, but without the view classifiers: decodes, crops/masks, saves media, writes result parts. For when no GPU is available. |
 | `run_echo_preprocessing_and_anonymization_with_classifier.py merge` | CPU | Combines result parts into the final anonymized table and prints QA counts |
+| `run_preprocessing_on_anonymized.py` | CPU (GPU with `--classify`) | For datasets that are **already anonymized** (e.g. MIMIC-IV-ECHO): preprocesses the DICOMs in a record list and writes the same outputs. See [Preprocessing only](#preprocessing-only). |
 
 Splitting the work this way lets you QA the anonymization before spending GPU time, and rerun Script 2 (new models or transforms) without touching the anonymization: bump `preprocess.pipeline_version`
 and every record is processed again.
@@ -25,8 +26,10 @@ and every record is processed again.
 Script 1 (`create_anonymization_plan.py`) reads only the DICOM headers and keeps files whose SOP class is ultrasound (`index.sop_classes`). Everything that
 can identify a patient stays in the secure area (`paths.secure_dir`); only de-identified data reaches `paths.output_root`.
 
-- **Identifiers.** Each patient (`PatientID`) and study (`StudyInstanceUID`) gets a sequential ID (`P000000`, `S000000`), with
-  no hashing and no secret key. The mapping is stored in the append-only crosswalk, so a returning patient keeps their
+- **Identifiers.** Each patient (`PatientID`) and study (`StudyInstanceUID`) gets a random ID (`P` / `S` + 16 hex digits,
+  e.g. `P3f9a1c07b2e4d856`) from Python's `secrets`. The IDs are not derived from the real keys and do not follow the order
+  of the files, so they reveal nothing about either; there is no hashing and no secret key. A crosswalk with the old
+  sequential IDs (`P000000`) is rejected. The mapping is stored in the append-only crosswalk, so a returning patient keeps their
   `AnonPatientID`. Files missing either key are excluded, never grouped with other files.
 - **Dates.** Each patient gets one random offset of +99 to +100 years (`index.date_offset_days`), reused for all of their
   studies, so the intervals between studies are preserved. The dates in `index.date_fields` are copied only after shifting,
@@ -191,6 +194,75 @@ sbatch slurm/02_run_preprocess_only.sbatch       [configs/config.yaml] [--retry-
 - Job output goes to `slurm/logs/<job-name>_<job-id>.out`. Like the pipeline's own logs, it holds only counts and exception types.
 - Every stage resumes where it stopped, so if a job hits its time limit, resubmit it.
 
+## Preprocessing only
+
+Use `run_preprocessing_on_anonymized.py` when a dataset was **already de-identified** elsewhere (for example
+[MIMIC-IV-ECHO](https://physionet.org/content/mimic-iv-echo/1.0.1/)) and you only want to standardize it with the same
+cropping and masking (and, optionally, view classification) as the main pipeline. It skips the crosswalk, ID assignment
+and date shifting. This is different from [Without a GPU](#without-a-gpu-preprocessing-only) above, which still runs the
+full anonymization and only leaves out the classifiers.
+
+**Inputs**
+
+- An **echo record list** (`.csv` or `.parquet`), one row per DICOM. It needs a path column and the patient and study ID
+  columns, set with `--path-column`, `--patient-column` and `--study-column` (defaults: `FilePath`, `PatientID`,
+  `StudyID`). Paths are resolved against `--dicom-root`, which defaults to the record list's directory. A leading `/`
+  is ignored, so pass `--dicom-root /` if the list holds absolute paths.
+- Optionally an **echo study list** (`.csv` or `.parquet`) with the same study ID column.
+- A config, passed with `--config` (default `configs/config.yaml`), for the SOP classes, metadata allowlist, worker
+  counts, codec and model weights. Only its `index`, `preprocess` and `models` sections are read; a `paths` section is
+  ignored (`--output-root` and `--work-dir` replace it). `configs/config_preprocess_anonymized.yaml` is an example with
+  just those sections.
+
+```bash
+scripts/run_preprocess_anonymized.sh \
+  --record-list /data/my_dataset/echo-record-list.csv \
+  --study-list  /data/my_dataset/echo-study-list.csv \
+  --output-root /data/my_dataset_preprocessed \
+  --work-dir    /data/my_dataset_work \
+  [--classify] [--retry-errors]
+# = uv run python run_preprocessing_on_anonymized.py --config configs/config.yaml ...
+```
+
+**MIMIC-IV-ECHO**: its record list uses the columns `dicom_filepath`, `subject_id` and `study_id`, and paths relative to
+the dataset root (`files/p10/p10690270/s95240362/95240362_0004.dcm`), so with the lists in the dataset root:
+
+```bash
+scripts/run_preprocess_anonymized.sh --config configs/config_preprocess_anonymized.yaml \
+  --record-list /data/mimic-iv-echo/echo-record-list.csv \
+  --study-list  /data/mimic-iv-echo/echo-study-list.csv \
+  --path-column dicom_filepath --patient-column subject_id --study-column study_id \
+  --output-root /data/mimic-iv-echo-preprocessed \
+  --work-dir    /data/mimic-iv-echo-work
+```
+
+**What it does**
+
+1. Reads every listed DICOM header (like Script 1) and writes a work manifest to `--work-dir`. The IDs come from the
+   record list, and header dates are copied unchanged into the usual `<Date>Shifted` columns (no extra shift). An
+   existing work manifest is reused, so a rerun skips this step; delete `--work-dir` to rebuild it.
+2. Preprocesses the records on CPU (`preprocess.num_cpu_procs` processes), or with `--classify` also runs the view
+   classifiers on GPU (`preprocess.num_gpus` processes), then merges, exactly as the main pipeline does.
+3. Writes the outputs below in `--output-root`.
+
+**Outputs**
+
+- `files/<PatientID>/<StudyID>/<name>.<avi|png>`, named as in [Output naming](#output-naming).
+- `echo-video-list` and `echo-image-list`, with the same columns as the main pipeline plus `SourceFilePath` (the record
+  list's path value, to link back to the original DICOM). They are **CSV if the record list is CSV, parquet if it is
+  parquet**.
+- `echo-study-list`: if you passed `--study-list`, a copy of it filtered to the studies that have records, with all of
+  its columns and in its own format. Otherwise the standard `echo-study-list.csv` (`PatientID`, `StudyID`,
+  `StudyDateTime`).
+
+Notes:
+
+- `--work-dir` holds absolute source paths. Keep it outside `--output-root`.
+- Files are still filtered as in Script 1 (SOP class, pixel data, regions). In particular, a single-frame image without
+  a usable ultrasound region (`SequenceOfUltrasoundRegions`) is excluded, and a video without one is masked on the full
+  frame. Check the `files by status` counts in the log after the first run.
+- Rerunning after a complete merge reprocesses every record, as in the main pipeline.
+
 ## Outputs
 
 ### Secure area (`paths.secure_dir`), contains PHI
@@ -288,6 +360,7 @@ model weights or GPU.
 create_anonymization_plan.py                                 Script 1 (incl. output-naming rules)
 run_echo_preprocessing_and_anonymization_with_classifier.py  Script 2: Dataset, GPU processes, `run` and `merge`
 run_echo_preprocessing_and_anonymization.py                  Script 2 without the view classifiers (CPU processes)
+run_preprocessing_on_anonymized.py                           preprocessing only, for already-anonymized datasets (record list in)
 src/anon_crosswalk.py                                        append-only crosswalk with crash recovery
 src/dicom_utils.py                                           header reading, allowlist/date/age handling, regions, frame decoding
 src/image_utils.py                                           masking, resizing, AVI writing
